@@ -1,0 +1,16 @@
+/target
+
+# Rust
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Editors / IDE
+.idea/
+.vscode/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp

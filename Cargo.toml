@@ -1,0 +1,30 @@
+[package]
+name = "moving_media"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "moving_media"
+path = "src/lib.rs"
+
+[[bin]]
+name = "moving_media"
+path = "src/main.rs"
+
+[dependencies]
+eframe        = "0.27"
+egui          = "0.27"
+rusqlite      = { version = "0.31", features = ["bundled"] }
+blake3        = { version = "1", features = ["rayon"] }
+rayon         = "1"
+memmap2       = "0.9"
+rand          = "0.8"
+walkdir       = "2"
+anyhow        = "1"
+chrono        = { version = "0.4", features = ["serde"] }
+kamadak-exif  = "0.5"
+rfd           = "0.14"
+dirs          = "5"
+
+[dev-dependencies]
+tempfile = "3"
