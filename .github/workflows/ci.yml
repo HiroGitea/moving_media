@@ -2,10 +2,19 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
-      - main
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/**"
   pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/**"
 
 jobs:
   test:

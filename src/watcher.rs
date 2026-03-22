@@ -7,7 +7,10 @@ use std::time::Duration;
 use std::os::windows::ffi::OsStrExt;
 
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, DRIVE_REMOVABLE};
+use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+#[cfg(target_os = "windows")]
+const DRIVE_TYPE_REMOVABLE: u32 = 2;
 
 /// 检测到的可选储存设备。这里只做发现，不自动读取内容。
 #[derive(Clone, Debug)]
@@ -128,5 +131,5 @@ fn is_removable_windows_drive(path: &std::path::Path) -> bool {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
 
-    unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_REMOVABLE }
+    unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_TYPE_REMOVABLE }
 }

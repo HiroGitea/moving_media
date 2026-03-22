@@ -172,6 +172,7 @@ static NOTO_EMOJI: &[u8] = include_bytes!("../assets/NotoEmoji-Regular.ttf");
 
 fn load_cjk_font(ctx: &egui::Context) {
     // 静态候选路径
+    #[allow(unused_mut)]
     let mut candidates: Vec<String> = vec![
         // macOS — 精确路径
         "/System/Library/Fonts/STHeiti Medium.ttc".into(),
