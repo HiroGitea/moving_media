@@ -142,6 +142,8 @@ pub struct App {
     card_alert_gen: u64,
     /// 用户已手动关闭的通知（按卷路径去重）
     dismissed_alerts: std::collections::HashSet<PathBuf>,
+    /// 已写入“检测到设备”日志的卷，避免重复刷屏
+    logged_card_alerts: std::collections::HashSet<PathBuf>,
 }
 
 // ── 字体 & 样式 ──────────────────────────────────────────────
@@ -281,14 +283,10 @@ impl App {
 
         // 启动储存卡监听线程
         start_watcher(
-            config.photos_db(),
-            config.videos_db(),
-            config.photos_mirror_db(),
-            config.videos_mirror_db(),
             card_alert.clone(),
             cc.egui_ctx.clone(),
         );
-        log.push("储存卡监听已启动");
+        log.push("储存卡监听已启动（检测到后等待手动选择）");
 
         let initial_source = config.last_source.as_deref()
             .map(|p| p.to_string_lossy().to_string())
@@ -323,6 +321,7 @@ impl App {
             card_alert_cache: Vec::new(),
             card_alert_gen: 0,
             dismissed_alerts: std::collections::HashSet::new(),
+            logged_card_alerts: std::collections::HashSet::new(),
         }
     }
 }
@@ -403,27 +402,25 @@ impl eframe::App for App {
             }
         }
 
+        // 卷被移除后，清理对应的通知状态，避免下次插入同路径的设备被永久隐藏
+        {
+            let current_paths: std::collections::HashSet<PathBuf> = self.card_alert_cache
+                .iter()
+                .map(|card| card.volume_path.clone())
+                .collect();
+            self.dismissed_alerts.retain(|path| current_paths.contains(path));
+            self.logged_card_alerts.retain(|path| current_paths.contains(path));
+        }
+
         // ── 储存卡检测日志（每卷只记录一次） ──────
         {
             let cache = self.card_alert_cache.clone();
             for card in &cache {
-                if !card.scanning && !self.dismissed_alerts.contains(&card.volume_path) {
-                    let key = card.volume_path.join(".logged");
-                    if !self.dismissed_alerts.contains(&key) {
-                        if card.all_backed_up() {
-                            self.log.push(format!(
-                                "储存卡「{}」: 全部 {} 个文件已备份",
-                                card.volume_name, card.total
-                            ));
-                        } else {
-                            self.log.push(format!(
-                                "储存卡「{}」: {} 个待备份，{} 个已备份",
-                                card.volume_name, card.new_total(),
-                                card.photos_backed_up + card.videos_backed_up
-                            ));
-                        }
-                        self.dismissed_alerts.insert(key);
-                    }
+                if self.logged_card_alerts.insert(card.volume_path.clone()) {
+                    self.log.push(format!(
+                        "检测到储存设备「{}」，等待手动选择后再扫描",
+                        card.volume_name
+                    ));
                 }
             }
         }
@@ -569,7 +566,7 @@ impl App {
 
         // 先收集操作，避免在 egui 闭包内借用 self
         let mut to_dismiss: Vec<PathBuf> = Vec::new();
-        let mut to_backup: Option<PathBuf> = None;
+        let mut to_select: Option<(PathBuf, String)> = None;
 
         egui::TopBottomPanel::top("card_banner").show(ctx, |ui| {
             egui::Frame::none()
@@ -578,33 +575,19 @@ impl App {
                 .show(ui, |ui| {
                     for card in &visible {
                         ui.horizontal(|ui| {
-                            if card.scanning {
-                                ui.spinner();
-                                ui.label(format!("「{}」正在扫描媒体文件…", card.volume_name));
-                            } else if card.all_backed_up() {
-                                ui.colored_label(GREEN, format!(
-                                    "✅ 「{}」{} 个文件已全部备份（📷{} 🎬{}）",
-                                    card.volume_name, card.total,
-                                    card.photos_backed_up, card.videos_backed_up,
-                                ));
-                            } else {
-                                ui.colored_label(ORANGE, format!(
-                                    "⚠ 「{}」{} 个未备份（📷{} 🎬{}），已备份 {}",
-                                    card.volume_name, card.new_total(),
-                                    card.photos_new, card.videos_new,
-                                    card.photos_backed_up + card.videos_backed_up,
-                                ));
-                            }
+                            ui.colored_label(ORANGE, format!("已检测到储存设备「{}」", card.volume_name));
+                            ui.colored_label(DIM, "未读取内容，等待你选择");
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button("✕").clicked() {
                                     to_dismiss.push(card.volume_path.clone());
                                 }
-                                if !card.scanning && !card.all_backed_up()
-                                    && to_backup.is_none()
-                                {
-                                    if ui.add_sized([70.0, 22.0], egui::Button::new("备份此卡")).clicked() {
-                                        to_backup = Some(card.volume_path.clone());
+                                if to_select.is_none() {
+                                    if ui.add_sized([82.0, 22.0], egui::Button::new("选择此卡")).clicked() {
+                                        to_select = Some((
+                                            card.volume_path.clone(),
+                                            card.volume_name.clone(),
+                                        ));
                                         to_dismiss.push(card.volume_path.clone());
                                     }
                                 }
@@ -617,9 +600,12 @@ impl App {
         for path in to_dismiss {
             self.dismissed_alerts.insert(path);
         }
-        if let Some(path) = to_backup {
+        if let Some((path, name)) = to_select {
             self.source_path = path.to_string_lossy().to_string();
-            self.do_scan_for_backup();
+            self.log.push(format!(
+                "已选择储存设备「{}」作为来源，等待手动点击“扫描检测”或“备份”",
+                name
+            ));
         }
     }
 
