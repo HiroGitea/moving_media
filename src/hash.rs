@@ -13,9 +13,7 @@ pub fn hash_file(path: &Path) -> Result<String> {
     if meta.len() >= 128 * 1024 {
         // 大文件：mmap + Rayon 多线程并行哈希
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        let hash = blake3::Hasher::new()
-            .update_rayon(&mmap)
-            .finalize();
+        let hash = blake3::Hasher::new().update_rayon(&mmap).finalize();
         Ok(hash.to_hex().to_string())
     } else {
         // 小文件：直接流式读取
@@ -25,7 +23,9 @@ pub fn hash_file(path: &Path) -> Result<String> {
         let mut reader = std::io::BufReader::new(file);
         loop {
             let n = reader.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buf[..n]);
         }
         Ok(hasher.finalize().to_hex().to_string())
@@ -41,7 +41,10 @@ mod tests {
     fn test_hash_length_and_deterministic() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.bin");
-        std::fs::File::create(&path).unwrap().write_all(b"hello world").unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"hello world")
+            .unwrap();
         let h1 = hash_file(&path).unwrap();
         let h2 = hash_file(&path).unwrap();
         assert_eq!(h1.len(), 64, "BLAKE3 hex should be 64 chars");
@@ -53,8 +56,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p1 = dir.path().join("a.bin");
         let p2 = dir.path().join("b.bin");
-        std::fs::File::create(&p1).unwrap().write_all(b"aaa").unwrap();
-        std::fs::File::create(&p2).unwrap().write_all(b"bbb").unwrap();
+        std::fs::File::create(&p1)
+            .unwrap()
+            .write_all(b"aaa")
+            .unwrap();
+        std::fs::File::create(&p2)
+            .unwrap()
+            .write_all(b"bbb")
+            .unwrap();
         assert_ne!(hash_file(&p1).unwrap(), hash_file(&p2).unwrap());
     }
 
@@ -64,7 +73,10 @@ mod tests {
         let path = dir.path().join("large.bin");
         // 写入 256 KB，触发 mmap + rayon 路径
         let data = vec![0xABu8; 256 * 1024];
-        std::fs::File::create(&path).unwrap().write_all(&data).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&data)
+            .unwrap();
         let h1 = hash_file(&path).unwrap();
         let h2 = hash_file(&path).unwrap();
         assert_eq!(h1.len(), 64);

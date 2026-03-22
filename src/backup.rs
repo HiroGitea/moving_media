@@ -62,7 +62,10 @@ pub fn backup_files(
         };
 
         match result {
-            Ok(Some(bf)) => { copied += 1; backed_up.push(bf); }
+            Ok(Some(bf)) => {
+                copied += 1;
+                backed_up.push(bf);
+            }
             Ok(None) => skipped += 1,
             Err(e) => {
                 failed += 1;
@@ -72,7 +75,13 @@ pub fn backup_files(
     }
 
     progress_cb(total, total);
-    BackupResult { copied, skipped, failed, errors, backed_up }
+    BackupResult {
+        copied,
+        skipped,
+        failed,
+        errors,
+        backed_up,
+    }
 }
 
 /// Re-hash every successfully copied file on both the SD card (source) and disk (dest).
@@ -91,12 +100,19 @@ pub fn verify_backup(
             Ok(h) if h == file.hash => {}
             Ok(h) => mismatches.push(format!(
                 "SD卡文件变化: {}  期望 {}  实际 {}",
-                file.source.file_name().unwrap_or_default().to_string_lossy(),
-                &file.hash[..8], &h[..8]
+                file.source
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                &file.hash[..8],
+                &h[..8]
             )),
             Err(e) => mismatches.push(format!(
                 "SD卡读取失败: {} — {e}",
-                file.source.file_name().unwrap_or_default().to_string_lossy()
+                file.source
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             )),
         }
         done += 1;
@@ -107,7 +123,8 @@ pub fn verify_backup(
             Ok(h) => mismatches.push(format!(
                 "磁盘文件异常: {}  期望 {}  实际 {}",
                 file.dest.file_name().unwrap_or_default().to_string_lossy(),
-                &file.hash[..8], &h[..8]
+                &file.hash[..8],
+                &h[..8]
             )),
             Err(e) => mismatches.push(format!(
                 "磁盘读取失败: {} — {e}",
@@ -122,7 +139,12 @@ pub fn verify_backup(
 }
 
 /// Returns Ok(Some(BackedUpFile)) if copied, Ok(None) if already backed up (skipped).
-fn backup_single(file: &MediaFile, session: &str, dest_root: &Path, db: &mut Database) -> Result<Option<BackedUpFile>> {
+fn backup_single(
+    file: &MediaFile,
+    session: &str,
+    dest_root: &Path,
+    db: &mut Database,
+) -> Result<Option<BackedUpFile>> {
     let hash = hash_file(&file.path)?;
 
     // Check database for duplicate; also verify the file actually exists on disk.
@@ -175,7 +197,9 @@ fn backup_single(file: &MediaFile, session: &str, dest_root: &Path, db: &mut Dat
         if dest_hash != hash {
             bail!(
                 "校验失败: {} 复制后哈希不一致（源: {} 目标: {}）",
-                file.filename, hash, dest_hash
+                file.filename,
+                hash,
+                dest_hash
             );
         }
         std::fs::rename(&tmp_file, &dest_file)?;
@@ -200,7 +224,11 @@ fn backup_single(file: &MediaFile, session: &str, dest_root: &Path, db: &mut Dat
         session,
     )?;
 
-    Ok(Some(BackedUpFile { source: file.path.clone(), dest: dest_file, hash }))
+    Ok(Some(BackedUpFile {
+        source: file.path.clone(),
+        dest: dest_file,
+        hash,
+    }))
 }
 
 /// If dest path already exists (filename collision), append _2, _3 etc.
@@ -209,7 +237,10 @@ fn unique_dest_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
     let parent = path.parent().unwrap();
     let mut n = 2u32;
     loop {
@@ -243,7 +274,10 @@ pub fn spot_check(
     // Group by session; track the latest verified_at per session.
     let mut by_session: HashMap<String, Vec<_>> = HashMap::new();
     for rec in records {
-        by_session.entry(rec.session_name.clone()).or_default().push(rec);
+        by_session
+            .entry(rec.session_name.clone())
+            .or_default()
+            .push(rec);
     }
 
     // Determine which sessions need checking based on mtime.
@@ -278,7 +312,11 @@ pub fn spot_check(
     }
 
     progress_cb(total, total);
-    Ok(SpotCheckResult { checked, sessions_covered, mismatches })
+    Ok(SpotCheckResult {
+        checked,
+        sessions_covered,
+        mismatches,
+    })
 }
 
 /// Returns true if any file or directory under `dir` (recursively) has an mtime
@@ -286,7 +324,9 @@ pub fn spot_check(
 fn dir_modified_since(dir: &Path, since: Option<std::time::SystemTime>) -> bool {
     let Some(since) = since else { return true };
 
-    let Ok(entries) = std::fs::read_dir(dir) else { return true };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
@@ -320,9 +360,7 @@ fn verify_record(
             "哈希不符: {}  期望: {}  实际: {}",
             record.dest_path, record.hash, h
         )),
-        Err(e) => mismatches.push(format!(
-            "读取失败: {} — {e}", record.dest_path
-        )),
+        Err(e) => mismatches.push(format!("读取失败: {} — {e}", record.dest_path)),
     }
 }
 
@@ -367,9 +405,12 @@ pub fn verify_files(
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if !entry.file_type().is_file() { continue; }
+        if !entry.file_type().is_file() {
+            continue;
+        }
         let path = entry.path().to_path_buf();
-        let ext = path.extension()
+        let ext = path
+            .extension()
             .and_then(|x| x.to_str())
             .map(|x| x.to_lowercase())
             .unwrap_or_default();
@@ -382,10 +423,8 @@ pub fn verify_files(
 
     let records = db.list_all()?;
     // Build a set of (hash → record) for quick lookup
-    let record_by_hash: std::collections::HashMap<&str, &crate::db::FileRecord> = records
-        .iter()
-        .map(|r| (r.hash.as_str(), r))
-        .collect();
+    let record_by_hash: std::collections::HashMap<&str, &crate::db::FileRecord> =
+        records.iter().map(|r| (r.hash.as_str(), r)).collect();
     // Track which DB hashes we've seen on disk
     let mut seen_hashes: HashSet<String> = HashSet::new();
 
@@ -396,7 +435,8 @@ pub fn verify_files(
     // Pass 1: hash every file on disk, compare with DB
     for path in &disk_files {
         progress_cb(checked, total);
-        let rel_path = path.strip_prefix(media_root)
+        let rel_path = path
+            .strip_prefix(media_root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();

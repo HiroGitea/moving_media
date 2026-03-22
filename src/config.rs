@@ -7,10 +7,64 @@ pub struct Config {
     pub last_source: Option<PathBuf>,
 }
 
+fn fallback_base_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(std::env::temp_dir)
+}
+
 fn config_base_dir() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+        .unwrap_or_else(fallback_base_dir)
         .join("moving_media")
+}
+
+pub fn data_base_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(fallback_base_dir)
+        .join("moving_media")
+}
+
+fn default_photos_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return PathBuf::from("/Volumes/My_Files/Backup/Media/Photos");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return PathBuf::from("/mnt/My_Files/Backup/Media/Photos");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return PathBuf::from(r"E:\Backup\Media\Photos");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        fallback_base_dir().join("moving_media/Photos")
+    }
+}
+
+fn default_videos_root() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return PathBuf::from("/Volumes/My_Files/Backup/Media/Videos");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return PathBuf::from("/mnt/My_Files/Backup/Media/Videos");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return PathBuf::from(r"E:\Backup\Media\Videos");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        fallback_base_dir().join("moving_media/Videos")
+    }
 }
 
 /// Path to the persistent config file: ~/.config/moving_media/config
@@ -29,25 +83,22 @@ impl Config {
 
         let photos_root = std::env::var("MOVING_MEDIA_PHOTOS")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                file_photos.unwrap_or_else(|| PathBuf::from("/Volumes/My_Files/Backup/Media/Photos"))
-            });
+            .unwrap_or_else(|_| file_photos.unwrap_or_else(default_photos_root));
 
         let videos_root = std::env::var("MOVING_MEDIA_VIDEOS")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                file_videos.unwrap_or_else(|| PathBuf::from("/Volumes/My_Files/Backup/Media/Videos"))
-            });
+            .unwrap_or_else(|_| file_videos.unwrap_or_else(default_videos_root));
 
         let db_mirror_dir = std::env::var("MOVING_MEDIA_DB_BACKUP")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("/tmp"))
-                    .join(".local/share/moving_media")
-            });
+            .unwrap_or_else(|_| data_base_dir());
 
-        Config { photos_root, videos_root, db_mirror_dir, last_source }
+        Config {
+            photos_root,
+            videos_root,
+            db_mirror_dir,
+            last_source,
+        }
     }
 
     /// Returns true if both media directories exist on disk.
@@ -117,7 +168,10 @@ impl Config {
         let content = std::fs::read_to_string(path).ok()?;
         content
             .lines()
-            .find_map(|line| line.strip_prefix("last_path=").map(|v| v.trim().to_string()))
+            .find_map(|line| {
+                line.strip_prefix("last_path=")
+                    .map(|v| v.trim().to_string())
+            })
             .filter(|v| !v.is_empty())
     }
 
@@ -130,5 +184,35 @@ impl Config {
 
     pub fn clear_reindex_checkpoint(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_dir_ends_with_app_name() {
+        assert!(data_base_dir().ends_with("moving_media"));
+    }
+
+    #[test]
+    fn default_roots_have_expected_leaf_names() {
+        assert!(default_photos_root().ends_with("Photos"));
+        assert!(default_videos_root().ends_with("Videos"));
+    }
+
+    #[test]
+    fn default_roots_are_platform_specific() {
+        let photos = default_photos_root();
+
+        #[cfg(target_os = "macos")]
+        assert!(photos.starts_with("/Volumes"));
+
+        #[cfg(target_os = "linux")]
+        assert!(photos.starts_with("/mnt"));
+
+        #[cfg(target_os = "windows")]
+        assert!(photos.to_string_lossy().starts_with("E:\\"));
     }
 }

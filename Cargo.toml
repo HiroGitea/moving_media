@@ -26,5 +26,8 @@ kamadak-exif  = "0.5"
 rfd           = "0.14"
 dirs          = "5"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = "3"

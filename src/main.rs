@@ -3,10 +3,10 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("程序异常: {info}");
         eprintln!("{msg}");
-        let log_path = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".local/share/moving_media/crash.log");
-        let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(&std::path::PathBuf::from("/tmp")));
+        let log_path = moving_media::config::data_base_dir().join("crash.log");
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let entry = format!("[{ts}] {msg}\n");
         let _ = std::fs::OpenOptions::new()

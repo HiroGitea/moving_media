@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::backup::{backup_files, session_name, spot_check, verify_backup, verify_db_records, verify_files};
+use crate::backup::{
+    backup_files, session_name, spot_check, verify_backup, verify_db_records, verify_files,
+};
 use crate::config::Config;
 use crate::db::Database;
 use crate::scanner::{scan_source, unique_dates, MediaFile, MediaType};
-use crate::watcher::{CardAlert, start_watcher};
+use crate::watcher::{start_watcher, CardAlert};
 
 // ── Log ──────────────────────────────────────────────────────
 struct LogInner {
@@ -24,7 +26,12 @@ struct Log {
 
 impl Log {
     fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(LogInner { entries: Vec::new(), generation: 0 })) }
+        Self {
+            inner: Arc::new(Mutex::new(LogInner {
+                entries: Vec::new(),
+                generation: 0,
+            })),
+        }
     }
 
     fn push(&self, msg: impl Into<String>) {
@@ -58,10 +65,20 @@ impl Log {
 enum TaskResult {
     #[default]
     None,
-    BackupWithVerify { summary: String },
-    Verify { errors: Vec<String> },
-    Reindex { summary: String },
-    Prescan { files: Vec<MediaFile>, backed_up: usize, new_count: usize },
+    BackupWithVerify {
+        summary: String,
+    },
+    Verify {
+        errors: Vec<String>,
+    },
+    Reindex {
+        summary: String,
+    },
+    Prescan {
+        files: Vec<MediaFile>,
+        backed_up: usize,
+        new_count: usize,
+    },
     Error(String),
 }
 
@@ -76,7 +93,11 @@ struct TaskState {
 
 impl TaskState {
     fn ratio(&self) -> f32 {
-        if self.total == 0 { 0.0 } else { self.current as f32 / self.total as f32 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.current as f32 / self.total as f32
+        }
     }
 }
 
@@ -92,8 +113,8 @@ enum Screen {
     NamingSingle,
     NamingMulti,
     Running,
-    SpotChecking,   // 备份后自动抽检进行中
-    SpotCheckDone,  // 抽检结果
+    SpotChecking,  // 备份后自动抽检进行中
+    SpotCheckDone, // 抽检结果
     Done,
     VerifyPick,
     VerifyDone,
@@ -172,7 +193,9 @@ fn load_cjk_font(ctx: &egui::Context) {
     // macOS: 搜索 PingFang.ttc（路径含哈希，无法硬编码）
     #[cfg(target_os = "macos")]
     {
-        if let Ok(entries) = std::fs::read_dir("/System/Library/AssetsV2/com_apple_MobileAsset_Font8") {
+        if let Ok(entries) =
+            std::fs::read_dir("/System/Library/AssetsV2/com_apple_MobileAsset_Font8")
+        {
             for entry in entries.flatten() {
                 let p = entry.path().join("AssetData/PingFang.ttc");
                 if p.exists() {
@@ -190,17 +213,37 @@ fn load_cjk_font(ctx: &egui::Context) {
     // - Emoji 字体处理 emoji 码位
     // - CJK 字体最后兜底中文字符
     // 不能放 position 0，否则 NotoEmoji 的等宽数字字形会抢先渲染数字。
-    fonts.font_data.insert("emoji".to_owned(), egui::FontData::from_static(NOTO_EMOJI));
-    fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(1, "emoji".to_owned());
-    fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(1, "emoji".to_owned());
+    fonts
+        .font_data
+        .insert("emoji".to_owned(), egui::FontData::from_static(NOTO_EMOJI));
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(1, "emoji".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(1, "emoji".to_owned());
 
     for path in &candidates {
         if let Ok(data) = std::fs::read(path) {
-            fonts.font_data.insert("cjk".to_owned(), egui::FontData::from_owned(data));
+            fonts
+                .font_data
+                .insert("cjk".to_owned(), egui::FontData::from_owned(data));
             // Push CJK to end of fallback chain so default font handles ASCII/digits first.
             // CJK at position 1 would render digits with full-width glyphs.
-            fonts.families.entry(egui::FontFamily::Proportional).or_default().push("cjk".to_owned());
-            fonts.families.entry(egui::FontFamily::Monospace).or_default().push("cjk".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("cjk".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("cjk".to_owned());
             break;
         }
     }
@@ -249,15 +292,22 @@ impl App {
                 log.push(format!("视频目录: {}", config.videos_root.display()));
 
                 // 启动时检查数据库版本
-                for (label, path) in [("照片", config.photos_db()), ("视频", config.videos_db())] {
+                for (label, path) in [("照片", config.photos_db()), ("视频", config.videos_db())]
+                {
                     match crate::db::check_version(&path) {
                         Ok(crate::db::VersionStatus::Ok) => {}
-                        Ok(crate::db::VersionStatus::TooNew { db_version, app_version }) => {
+                        Ok(crate::db::VersionStatus::TooNew {
+                            db_version,
+                            app_version,
+                        }) => {
                             log.push(format!(
                                 "⚠ {label}数据库版本 v{db_version} 高于程序支持的 v{app_version}，请升级程序"
                             ));
                         }
-                        Ok(crate::db::VersionStatus::NeedsUpgrade { db_version, app_version }) => {
+                        Ok(crate::db::VersionStatus::NeedsUpgrade {
+                            db_version,
+                            app_version,
+                        }) => {
                             log.push(format!(
                                 "{label}数据库 v{db_version} → v{app_version}，将在首次使用时自动迁移"
                             ));
@@ -282,13 +332,12 @@ impl App {
         let card_alert: Arc<Mutex<(Vec<CardAlert>, u64)>> = Arc::new(Mutex::new((Vec::new(), 0)));
 
         // 启动储存卡监听线程
-        start_watcher(
-            card_alert.clone(),
-            cc.egui_ctx.clone(),
-        );
+        start_watcher(card_alert.clone(), cc.egui_ctx.clone());
         log.push("储存卡监听已启动（检测到后等待手动选择）");
 
-        let initial_source = config.last_source.as_deref()
+        let initial_source = config
+            .last_source
+            .as_deref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -335,8 +384,13 @@ impl eframe::App for App {
             if done {
                 let result = std::mem::take(&mut self.task.lock().unwrap().result);
                 match result {
-                    TaskResult::Prescan { files, backed_up, new_count } => {
-                        self.log.push(format!("已备份: {backed_up}, 待备份: {new_count}"));
+                    TaskResult::Prescan {
+                        files,
+                        backed_up,
+                        new_count,
+                    } => {
+                        self.log
+                            .push(format!("已备份: {backed_up}, 待备份: {new_count}"));
                         self.scanned_files = files;
                         self.prescan_backed_up = backed_up;
                         self.prescan_new = new_count;
@@ -346,7 +400,9 @@ impl eframe::App for App {
                         self.log.push(&msg);
                         self.screen = Screen::Home;
                     }
-                    _ => { self.screen = Screen::Home; }
+                    _ => {
+                        self.screen = Screen::Home;
+                    }
                 }
             } else {
                 ctx.request_repaint();
@@ -404,12 +460,15 @@ impl eframe::App for App {
 
         // 卷被移除后，清理对应的通知状态，避免下次插入同路径的设备被永久隐藏
         {
-            let current_paths: std::collections::HashSet<PathBuf> = self.card_alert_cache
+            let current_paths: std::collections::HashSet<PathBuf> = self
+                .card_alert_cache
                 .iter()
                 .map(|card| card.volume_path.clone())
                 .collect();
-            self.dismissed_alerts.retain(|path| current_paths.contains(path));
-            self.logged_card_alerts.retain(|path| current_paths.contains(path));
+            self.dismissed_alerts
+                .retain(|path| current_paths.contains(path));
+            self.logged_card_alerts
+                .retain(|path| current_paths.contains(path));
         }
 
         // ── 储存卡检测日志（每卷只记录一次） ──────
@@ -480,11 +539,7 @@ impl eframe::App for App {
                                     self.log_gen = gen;
                                 }
                                 for line in &self.log_cache {
-                                    ui.label(
-                                        egui::RichText::new(line)
-                                            .size(12.0)
-                                            .color(LOG_FG),
-                                    );
+                                    ui.label(egui::RichText::new(line).size(12.0).color(LOG_FG));
                                 }
                             });
                     });
@@ -494,20 +549,20 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(6.0);
             match self.screen {
-                Screen::Setup        => self.ui_setup(ui),
-                Screen::Home         => self.ui_home(ui),
-                Screen::Prescanning  => self.ui_prescanning(ui),
-                Screen::ScanResult   => self.ui_scan_result(ui),
+                Screen::Setup => self.ui_setup(ui),
+                Screen::Home => self.ui_home(ui),
+                Screen::Prescanning => self.ui_prescanning(ui),
+                Screen::ScanResult => self.ui_scan_result(ui),
                 Screen::DateDecision => self.ui_date_decision(ui),
                 Screen::NamingSingle => self.ui_naming_single(ui),
-                Screen::NamingMulti  => self.ui_naming_multi(ui),
-                Screen::Running       => self.ui_running(ui),
-                Screen::SpotChecking  => self.ui_spot_checking(ui),
+                Screen::NamingMulti => self.ui_naming_multi(ui),
+                Screen::Running => self.ui_running(ui),
+                Screen::SpotChecking => self.ui_spot_checking(ui),
                 Screen::SpotCheckDone => self.ui_spot_check_done(ui),
-                Screen::Done          => self.ui_done(ui),
-                Screen::VerifyPick   => self.ui_verify_pick(ui),
-                Screen::VerifyDone   => self.ui_verify_done(ui),
-                Screen::ListRecords  => self.ui_list_records(ui),
+                Screen::Done => self.ui_done(ui),
+                Screen::VerifyPick => self.ui_verify_pick(ui),
+                Screen::VerifyDone => self.ui_verify_done(ui),
+                Screen::ListRecords => self.ui_list_records(ui),
             }
         });
     }
@@ -515,7 +570,6 @@ impl eframe::App for App {
 
 // ── UI ───────────────────────────────────────────────────────
 impl App {
-
     // ─ 重建索引浮动进度条 ──────────────────────────────────
     fn show_reindex_bar(&mut self, ctx: &egui::Context) {
         if !self.reindex_running && self.reindex_result_msg.is_empty() {
@@ -534,21 +588,26 @@ impl App {
                         };
                         ui.horizontal(|ui| {
                             ui.label("🔄 重建索引");
-                            ui.add(
-                                egui::ProgressBar::new(ratio)
-                                    .desired_width(320.0)
-                                    .text(if tot > 0 { format!("{cur}/{tot}") } else { "准备中…".into() }),
-                            );
+                            ui.add(egui::ProgressBar::new(ratio).desired_width(320.0).text(
+                                if tot > 0 {
+                                    format!("{cur}/{tot}")
+                                } else {
+                                    "准备中…".into()
+                                },
+                            ));
                         });
                     } else {
                         // 显示完成结果，点击关闭
                         ui.horizontal(|ui| {
                             ui.label(format!("🔄 {}", self.reindex_result_msg));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").clicked() {
-                                    self.reindex_result_msg.clear();
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("✕").clicked() {
+                                        self.reindex_result_msg.clear();
+                                    }
+                                },
+                            );
                         });
                     }
                 });
@@ -557,12 +616,15 @@ impl App {
 
     // ─ 储存卡通知 banner（支持多卷同时插入）──────────────
     fn show_card_banner(&mut self, ctx: &egui::Context) {
-        let visible: Vec<CardAlert> = self.card_alert_cache
+        let visible: Vec<CardAlert> = self
+            .card_alert_cache
             .iter()
             .filter(|c| !self.dismissed_alerts.contains(&c.volume_path))
             .cloned()
             .collect();
-        if visible.is_empty() { return; }
+        if visible.is_empty() {
+            return;
+        }
 
         // 先收集操作，避免在 egui 闭包内借用 self
         let mut to_dismiss: Vec<PathBuf> = Vec::new();
@@ -575,23 +637,32 @@ impl App {
                 .show(ui, |ui| {
                     for card in &visible {
                         ui.horizontal(|ui| {
-                            ui.colored_label(ORANGE, format!("已检测到储存设备「{}」", card.volume_name));
+                            ui.colored_label(
+                                ORANGE,
+                                format!("已检测到储存设备「{}」", card.volume_name),
+                            );
                             ui.colored_label(DIM, "未读取内容，等待你选择");
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").clicked() {
-                                    to_dismiss.push(card.volume_path.clone());
-                                }
-                                if to_select.is_none() {
-                                    if ui.add_sized([82.0, 22.0], egui::Button::new("选择此卡")).clicked() {
-                                        to_select = Some((
-                                            card.volume_path.clone(),
-                                            card.volume_name.clone(),
-                                        ));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("✕").clicked() {
                                         to_dismiss.push(card.volume_path.clone());
                                     }
-                                }
-                            });
+                                    if to_select.is_none() {
+                                        if ui
+                                            .add_sized([82.0, 22.0], egui::Button::new("选择此卡"))
+                                            .clicked()
+                                        {
+                                            to_select = Some((
+                                                card.volume_path.clone(),
+                                                card.volume_name.clone(),
+                                            ));
+                                            to_dismiss.push(card.volume_path.clone());
+                                        }
+                                    }
+                                },
+                            );
                         });
                     }
                 });
@@ -617,25 +688,28 @@ impl App {
         ui.separator();
         ui.add_space(10.0);
 
-        egui::Grid::new("setup_grid").num_columns(3).spacing([8.0, 10.0]).show(ui, |ui| {
-            ui.label("照片目录：");
-            ui.add(egui::TextEdit::singleline(&mut self.setup_photos).desired_width(360.0));
-            if ui.button("浏览…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    self.setup_photos = p.to_string_lossy().to_string();
+        egui::Grid::new("setup_grid")
+            .num_columns(3)
+            .spacing([8.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("照片目录：");
+                ui.add(egui::TextEdit::singleline(&mut self.setup_photos).desired_width(360.0));
+                if ui.button("浏览…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.setup_photos = p.to_string_lossy().to_string();
+                    }
                 }
-            }
-            ui.end_row();
+                ui.end_row();
 
-            ui.label("视频目录：");
-            ui.add(egui::TextEdit::singleline(&mut self.setup_videos).desired_width(360.0));
-            if ui.button("浏览…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    self.setup_videos = p.to_string_lossy().to_string();
+                ui.label("视频目录：");
+                ui.add(egui::TextEdit::singleline(&mut self.setup_videos).desired_width(360.0));
+                if ui.button("浏览…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.setup_videos = p.to_string_lossy().to_string();
+                    }
                 }
-            }
-            ui.end_row();
-        });
+                ui.end_row();
+            });
 
         if !self.setup_error.is_empty() {
             ui.add_space(6.0);
@@ -646,9 +720,17 @@ impl App {
         ui.horizontal(|ui| {
             // 从 Home ⚙ 进入时才显示返回，初始配置时不显示
             if self.config.is_ready() {
-                if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() { self.screen = Screen::Home; }
+                if ui
+                    .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                    .clicked()
+                {
+                    self.screen = Screen::Home;
+                }
             }
-            if ui.add_sized(BTN_WIDE, egui::Button::new("确认并初始化")).clicked() {
+            if ui
+                .add_sized(BTN_WIDE, egui::Button::new("确认并初始化"))
+                .clicked()
+            {
                 self.do_setup();
             }
         });
@@ -685,14 +767,20 @@ impl App {
             self.log.push(self.setup_error.as_str());
             return;
         }
-        self.log.push(format!("照片数据库已创建: {}", self.config.photos_db().display()));
+        self.log.push(format!(
+            "照片数据库已创建: {}",
+            self.config.photos_db().display()
+        ));
 
         if let Err(e) = Database::open(&self.config.videos_db(), Some(&vm)) {
             self.setup_error = format!("初始化视频数据库失败: {e}");
             self.log.push(self.setup_error.as_str());
             return;
         }
-        self.log.push(format!("视频数据库已创建: {}", self.config.videos_db().display()));
+        self.log.push(format!(
+            "视频数据库已创建: {}",
+            self.config.videos_db().display()
+        ));
         self.log.push("初始化完成，进入主界面");
 
         self.setup_error.clear();
@@ -707,17 +795,26 @@ impl App {
         // 状态行
         ui.horizontal(|ui| {
             let dot = |ui: &mut egui::Ui, ok: bool| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                let color = if ok { egui::Color32::from_rgb(34, 197, 94) } else { egui::Color32::from_rgb(239, 68, 68) };
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                let color = if ok {
+                    egui::Color32::from_rgb(34, 197, 94)
+                } else {
+                    egui::Color32::from_rgb(239, 68, 68)
+                };
                 ui.painter().circle_filled(rect.center(), 5.0, color);
             };
             let p = self.config.photos_root.is_dir();
             let v = self.config.videos_root.is_dir();
-            dot(ui, p); ui.small("Photos");
+            dot(ui, p);
+            ui.small("Photos");
             ui.add_space(6.0);
-            dot(ui, v); ui.small("Videos");
+            dot(ui, v);
+            ui.small("Videos");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("⚙").clicked() { self.screen = Screen::Setup; }
+                if ui.small_button("⚙").clicked() {
+                    self.screen = Screen::Setup;
+                }
             });
         });
 
@@ -745,10 +842,16 @@ impl App {
         let has_src = !self.source_path.is_empty();
         ui.horizontal(|ui| {
             ui.add_enabled_ui(has_src, |ui| {
-                if ui.add_sized(BTN_WIDE, egui::Button::new("🔍 扫描检测")).clicked() {
+                if ui
+                    .add_sized(BTN_WIDE, egui::Button::new("🔍 扫描检测"))
+                    .clicked()
+                {
                     self.do_prescan();
                 }
-                if ui.add_sized(BTN_MED, egui::Button::new("💾 备份")).clicked() {
+                if ui
+                    .add_sized(BTN_MED, egui::Button::new("💾 备份"))
+                    .clicked()
+                {
                     self.do_scan_for_backup();
                 }
             });
@@ -756,11 +859,30 @@ impl App {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_MED, egui::Button::new("✅ 校验文件")).clicked() { self.screen = Screen::VerifyPick; }
-            if ui.add_sized(BTN_MED, egui::Button::new("📋 备份记录")).clicked() { self.do_load_records(); }
-            let reindex_label = if self.reindex_running { "🔄 索引中…" } else { "🔄 重建索引" };
+            if ui
+                .add_sized(BTN_MED, egui::Button::new("✅ 校验文件"))
+                .clicked()
+            {
+                self.screen = Screen::VerifyPick;
+            }
+            if ui
+                .add_sized(BTN_MED, egui::Button::new("📋 备份记录"))
+                .clicked()
+            {
+                self.do_load_records();
+            }
+            let reindex_label = if self.reindex_running {
+                "🔄 索引中…"
+            } else {
+                "🔄 重建索引"
+            };
             ui.add_enabled_ui(!self.reindex_running, |ui| {
-                if ui.add_sized(BTN_MED, egui::Button::new(reindex_label)).clicked() { self.do_reindex(); }
+                if ui
+                    .add_sized(BTN_MED, egui::Button::new(reindex_label))
+                    .clicked()
+                {
+                    self.do_reindex();
+                }
             });
         });
     }
@@ -772,20 +894,41 @@ impl App {
         ui.add_space(8.0);
 
         let total = self.scanned_files.len();
-        let photos = self.scanned_files.iter().filter(|f| f.media_type == MediaType::Photo).count();
+        let photos = self
+            .scanned_files
+            .iter()
+            .filter(|f| f.media_type == MediaType::Photo)
+            .count();
         let videos = total - photos;
 
-        egui::Grid::new("scan_g").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-            ui.label("扫描到："); ui.label(format!("{total} 个（{photos} 照片 / {videos} 视频）")); ui.end_row();
-            ui.label("已备份："); ui.colored_label(GREEN, format!("✓ {}", self.prescan_backed_up)); ui.end_row();
-            ui.label("待备份："); ui.colored_label(ORANGE, format!("◎ {}", self.prescan_new)); ui.end_row();
-        });
+        egui::Grid::new("scan_g")
+            .num_columns(2)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("扫描到：");
+                ui.label(format!("{total} 个（{photos} 照片 / {videos} 视频）"));
+                ui.end_row();
+                ui.label("已备份：");
+                ui.colored_label(GREEN, format!("✓ {}", self.prescan_backed_up));
+                ui.end_row();
+                ui.label("待备份：");
+                ui.colored_label(ORANGE, format!("◎ {}", self.prescan_new));
+                ui.end_row();
+            });
 
         ui.add_space(14.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() { self.screen = Screen::Home; }
+            if ui
+                .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                .clicked()
+            {
+                self.screen = Screen::Home;
+            }
             if self.prescan_new > 0 {
-                if ui.add_sized(BTN_WIDE, egui::Button::new("💾 备份新文件")).clicked() {
+                if ui
+                    .add_sized(BTN_WIDE, egui::Button::new("💾 备份新文件"))
+                    .clicked()
+                {
                     self.enter_naming();
                 }
             }
@@ -798,17 +941,33 @@ impl App {
         ui.separator();
         ui.add_space(8.0);
 
-        let strs: Vec<String> = self.unique_dates.iter().map(|d| d.format("%Y-%m-%d").to_string()).collect();
+        let strs: Vec<String> = self
+            .unique_dates
+            .iter()
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .collect();
         ui.label(format!("检测到日期：{}", strs.join("、")));
         ui.add_space(10.0);
 
-        ui.radio_value(&mut self.split_mode, false, "合并 — 日期范围命名，一个文件夹");
-        ui.radio_value(&mut self.split_mode, true,  "拆分 — 每天单独文件夹");
+        ui.radio_value(
+            &mut self.split_mode,
+            false,
+            "合并 — 日期范围命名，一个文件夹",
+        );
+        ui.radio_value(&mut self.split_mode, true, "拆分 — 每天单独文件夹");
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() { self.screen = Screen::Home; }
-            if ui.add_sized(BTN_MED, egui::Button::new("下一步 →")).clicked() {
+            if ui
+                .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                .clicked()
+            {
+                self.screen = Screen::Home;
+            }
+            if ui
+                .add_sized(BTN_MED, egui::Button::new("下一步 →"))
+                .clicked()
+            {
                 if self.split_mode {
                     self.suffix_per_day = vec![String::new(); self.unique_dates.len()];
                     self.screen = Screen::NamingMulti;
@@ -849,11 +1008,21 @@ impl App {
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() {
-                self.screen = if self.unique_dates.len() > 1 { Screen::DateDecision } else { Screen::Home };
+            if ui
+                .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                .clicked()
+            {
+                self.screen = if self.unique_dates.len() > 1 {
+                    Screen::DateDecision
+                } else {
+                    Screen::Home
+                };
             }
             ui.add_enabled_ui(!suffix.is_empty(), |ui| {
-                if ui.add_sized(BTN_WIDE, egui::Button::new("开始备份 →")).clicked() {
+                if ui
+                    .add_sized(BTN_WIDE, egui::Button::new("开始备份 →"))
+                    .clicked()
+                {
                     self.do_backup_single();
                 }
             });
@@ -866,20 +1035,34 @@ impl App {
         ui.separator();
         ui.add_space(8.0);
 
-        egui::Grid::new("nm_grid").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-            for (i, date) in self.unique_dates.clone().iter().enumerate() {
-                ui.label(format!("{}：", date.format("%Y-%m-%d")));
-                ui.add(egui::TextEdit::singleline(&mut self.suffix_per_day[i]).desired_width(240.0));
-                ui.end_row();
-            }
-        });
+        egui::Grid::new("nm_grid")
+            .num_columns(2)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                for (i, date) in self.unique_dates.clone().iter().enumerate() {
+                    ui.label(format!("{}：", date.format("%Y-%m-%d")));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.suffix_per_day[i])
+                            .desired_width(240.0),
+                    );
+                    ui.end_row();
+                }
+            });
 
         ui.add_space(12.0);
         let ok = self.suffix_per_day.iter().all(|s| !s.trim().is_empty());
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() { self.screen = Screen::DateDecision; }
+            if ui
+                .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                .clicked()
+            {
+                self.screen = Screen::DateDecision;
+            }
             ui.add_enabled_ui(ok, |ui| {
-                if ui.add_sized(BTN_WIDE, egui::Button::new("开始备份 →")).clicked() {
+                if ui
+                    .add_sized(BTN_WIDE, egui::Button::new("开始备份 →"))
+                    .clicked()
+                {
                     self.do_backup_multi();
                 }
             });
@@ -903,7 +1086,11 @@ impl App {
                 egui::ProgressBar::new(ratio)
                     .desired_width(460.0)
                     .animate(true)
-                    .text(if tot > 0 { format!("{cur} / {tot}  ({:.0}%)", ratio * 100.0) } else { "准备中…".to_string() }),
+                    .text(if tot > 0 {
+                        format!("{cur} / {tot}  ({:.0}%)", ratio * 100.0)
+                    } else {
+                        "准备中…".to_string()
+                    }),
             );
 
             if !label.is_empty() {
@@ -927,7 +1114,11 @@ impl App {
                 egui::ProgressBar::new(ratio)
                     .desired_width(460.0)
                     .animate(true)
-                    .text(if tot > 0 { format!("{cur} / {tot}") } else { "扫描文件中…".to_string() }),
+                    .text(if tot > 0 {
+                        format!("{cur} / {tot}")
+                    } else {
+                        "扫描文件中…".to_string()
+                    }),
             );
         });
     }
@@ -973,9 +1164,13 @@ impl App {
             let t = self.task.lock().unwrap();
             if let TaskResult::BackupWithVerify { ref summary, .. } = t.result {
                 for line in summary.lines() {
-                    if line.starts_with("✓") { ui.colored_label(GREEN, line); }
-                    else if line.starts_with("✗") { ui.colored_label(RED, line); }
-                    else { ui.label(line); }
+                    if line.starts_with("✓") {
+                        ui.colored_label(GREEN, line);
+                    } else if line.starts_with("✗") {
+                        ui.colored_label(RED, line);
+                    } else {
+                        ui.label(line);
+                    }
                 }
                 ui.add_space(8.0);
                 ui.separator();
@@ -987,23 +1182,31 @@ impl App {
             if sc.checked == 0 {
                 ui.colored_label(DIM, "无新文件，跳过校验");
             } else if sc.mismatches.is_empty() {
-                ui.colored_label(GREEN,
-                    format!("✅ 全量校验通过：{} 个文件（SD卡 + 磁盘）全部一致",
-                        sc.checked));
+                ui.colored_label(
+                    GREEN,
+                    format!(
+                        "✅ 全量校验通过：{} 个文件（SD卡 + 磁盘）全部一致",
+                        sc.checked
+                    ),
+                );
             } else {
-                ui.colored_label(RED,
-                    format!("⚠ 发现 {} 个问题：", sc.mismatches.len()));
+                ui.colored_label(RED, format!("⚠ 发现 {} 个问题：", sc.mismatches.len()));
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                    for m in &sc.mismatches {
-                        ui.colored_label(RED, m);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for m in &sc.mismatches {
+                            ui.colored_label(RED, m);
+                        }
+                    });
             }
         }
 
         ui.add_space(14.0);
-        if ui.add_sized(BTN_WIDE, egui::Button::new("← 返回首页")).clicked() {
+        if ui
+            .add_sized(BTN_WIDE, egui::Button::new("← 返回首页"))
+            .clicked()
+        {
             self.screen = Screen::Home;
         }
     }
@@ -1037,15 +1240,22 @@ impl App {
                 ui.add_space(10.0);
                 let errors: Vec<String> = errors.to_vec();
                 ui.collapsing(format!("错误详情（{}）", errors.len()), |ui| {
-                    egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                        for e in &errors { ui.colored_label(RED, e); }
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(100.0)
+                        .show(ui, |ui| {
+                            for e in &errors {
+                                ui.colored_label(RED, e);
+                            }
+                        });
                 });
             }
         }
 
         ui.add_space(14.0);
-        if ui.add_sized(BTN_WIDE, egui::Button::new("← 返回首页")).clicked() {
+        if ui
+            .add_sized(BTN_WIDE, egui::Button::new("← 返回首页"))
+            .clicked()
+        {
             self.screen = Screen::Home;
         }
     }
@@ -1059,20 +1269,45 @@ impl App {
         ui.label("校验目的文件夹：扫描磁盘所有子文件夹，与数据库交叉比对。");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_WIDE, egui::Button::new("校验照片文件夹")).clicked() { self.do_verify(true); }
-            if ui.add_sized(BTN_WIDE, egui::Button::new("校验视频文件夹")).clicked() { self.do_verify(false); }
+            if ui
+                .add_sized(BTN_WIDE, egui::Button::new("校验照片文件夹"))
+                .clicked()
+            {
+                self.do_verify(true);
+            }
+            if ui
+                .add_sized(BTN_WIDE, egui::Button::new("校验视频文件夹"))
+                .clicked()
+            {
+                self.do_verify(false);
+            }
         });
 
         ui.add_space(12.0);
         ui.label("校验数据库：仅检查数据库记录对应的文件是否完好。");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.add_sized(BTN_WIDE, egui::Button::new("校验照片 DB")).clicked() { self.do_verify_db(true); }
-            if ui.add_sized(BTN_WIDE, egui::Button::new("校验视频 DB")).clicked() { self.do_verify_db(false); }
+            if ui
+                .add_sized(BTN_WIDE, egui::Button::new("校验照片 DB"))
+                .clicked()
+            {
+                self.do_verify_db(true);
+            }
+            if ui
+                .add_sized(BTN_WIDE, egui::Button::new("校验视频 DB"))
+                .clicked()
+            {
+                self.do_verify_db(false);
+            }
         });
 
         ui.add_space(10.0);
-        if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() { self.screen = Screen::Home; }
+        if ui
+            .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+            .clicked()
+        {
+            self.screen = Screen::Home;
+        }
     }
 
     // ─ VerifyDone ──────────────────────────────────────────
@@ -1084,16 +1319,23 @@ impl App {
         if self.verify_mismatches.is_empty() {
             ui.colored_label(GREEN, "✓ 所有文件校验通过，无损坏。");
         } else {
-            ui.colored_label(RED, format!("✗ 发现 {} 个问题：", self.verify_mismatches.len()));
+            ui.colored_label(
+                RED,
+                format!("✗ 发现 {} 个问题：", self.verify_mismatches.len()),
+            );
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                for msg in &self.verify_mismatches {
-                    ui.colored_label(RED, msg);
-                }
-            });
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for msg in &self.verify_mismatches {
+                        ui.colored_label(RED, msg);
+                    }
+                });
         }
         ui.add_space(12.0);
-        if ui.button("← 返回首页").clicked() { self.screen = Screen::Home; }
+        if ui.button("← 返回首页").clicked() {
+            self.screen = Screen::Home;
+        }
     }
 
     // ─ ListRecords ─────────────────────────────────────────
@@ -1108,20 +1350,33 @@ impl App {
             ui.small(format!("共 {} 条", self.list_records.len()));
             ui.add_space(4.0);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("rec_grid").num_columns(4).striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
-                    ui.strong("Session"); ui.strong("文件名"); ui.strong("大小"); ui.strong("时间"); ui.end_row();
-                    for r in &self.list_records {
-                        ui.label(&r.session_name);
-                        ui.label(&r.filename);
-                        ui.label(format!("{:.1} MB", r.file_size as f64 / 1_048_576.0));
-                        ui.label(r.backed_up_at.get(..10).unwrap_or("-"));
+                egui::Grid::new("rec_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong("Session");
+                        ui.strong("文件名");
+                        ui.strong("大小");
+                        ui.strong("时间");
                         ui.end_row();
-                    }
-                });
+                        for r in &self.list_records {
+                            ui.label(&r.session_name);
+                            ui.label(&r.filename);
+                            ui.label(format!("{:.1} MB", r.file_size as f64 / 1_048_576.0));
+                            ui.label(r.backed_up_at.get(..10).unwrap_or("-"));
+                            ui.end_row();
+                        }
+                    });
             });
         }
         ui.add_space(8.0);
-        if ui.add_sized(BTN_BACK, egui::Button::new("← 返回")).clicked() { self.screen = Screen::Home; }
+        if ui
+            .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+            .clicked()
+        {
+            self.screen = Screen::Home;
+        }
     }
 
     // ── 业务逻辑 ───────────────────────────────────────────
@@ -1149,7 +1404,9 @@ impl App {
         let vm = self.config.videos_mirror_db();
         let task = self.task.clone();
         let log = self.log.clone();
-        { *task.lock().unwrap() = TaskState::default(); }
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
 
         std::thread::spawn(move || {
             let files = match scan_source(&source) {
@@ -1167,17 +1424,23 @@ impl App {
             };
 
             log.push("正在计算哈希并对比数据库…");
-            let photos_db = Database::open(&pd, Some(&pm)).ok()
+            let photos_db = Database::open(&pd, Some(&pm))
+                .ok()
                 .or_else(|| Database::open_readonly(&pm).ok());
-            let videos_db = Database::open(&vd, Some(&vm)).ok()
+            let videos_db = Database::open(&vd, Some(&vm))
+                .ok()
                 .or_else(|| Database::open_readonly(&vm).ok());
 
             let total = files.len();
-            { let mut t = task.lock().unwrap(); t.total = total; }
+            {
+                let mut t = task.lock().unwrap();
+                t.total = total;
+            }
 
             // 并行哈希（rayon），然后串行查询数据库
             let progress = Arc::new(AtomicUsize::new(0));
-            let hashes: Vec<Option<String>> = files.par_iter()
+            let hashes: Vec<Option<String>> = files
+                .par_iter()
                 .map({
                     let progress = progress.clone();
                     let task = task.clone();
@@ -1199,15 +1462,24 @@ impl App {
                         MediaType::Photo => &photos_db,
                         MediaType::Video => &videos_db,
                     };
-                    let found = db.as_ref()
+                    let found = db
+                        .as_ref()
                         .and_then(|d| d.find_by_hash(hash).ok().flatten())
                         .is_some();
-                    if found { backed += 1; } else { new += 1; }
+                    if found {
+                        backed += 1;
+                    } else {
+                        new += 1;
+                    }
                 }
             }
 
             let mut t = task.lock().unwrap();
-            t.result = TaskResult::Prescan { files, backed_up: backed, new_count: new };
+            t.result = TaskResult::Prescan {
+                files,
+                backed_up: backed,
+                new_count: new,
+            };
             t.done = true;
         });
 
@@ -1244,16 +1516,22 @@ impl App {
     }
 
     fn do_backup_multi(&mut self) {
-        let ds: Vec<(NaiveDate, String)> = self.unique_dates.iter()
+        let ds: Vec<(NaiveDate, String)> = self
+            .unique_dates
+            .iter()
             .zip(self.suffix_per_day.iter())
             .map(|(d, s)| (*d, session_name(&[*d], s.trim())))
             .collect();
-        for (_, s) in &ds { self.log.push(format!("备份到: {s}")); }
+        for (_, s) in &ds {
+            self.log.push(format!("备份到: {s}"));
+        }
         let files = self.scanned_files.clone();
         self.spawn_backup(
             move |file| {
                 if let Some(date) = file.capture_date {
-                    ds.iter().find(|(d, _)| *d == date).map(|(_, s)| s.clone())
+                    ds.iter()
+                        .find(|(d, _)| *d == date)
+                        .map(|(_, s)| s.clone())
                         .unwrap_or_else(|| ds.last().unwrap().1.clone())
                 } else {
                     ds.last().unwrap().1.clone()
@@ -1263,7 +1541,11 @@ impl App {
         );
     }
 
-    fn spawn_backup<F: Fn(&MediaFile) -> String + Send + 'static>(&mut self, session_for: F, files: Vec<MediaFile>) {
+    fn spawn_backup<F: Fn(&MediaFile) -> String + Send + 'static>(
+        &mut self,
+        session_for: F,
+        files: Vec<MediaFile>,
+    ) {
         let pr = self.config.photos_root.clone();
         let vr = self.config.videos_root.clone();
         let pd = self.config.photos_db();
@@ -1274,11 +1556,19 @@ impl App {
         let log = self.log.clone();
         let arc = self.spot_result_arc.clone();
 
-        { let mut t = task.lock().unwrap(); *t = TaskState { total: files.len(), ..Default::default() }; }
+        {
+            let mut t = task.lock().unwrap();
+            *t = TaskState {
+                total: files.len(),
+                ..Default::default()
+            };
+        }
 
         std::thread::spawn(move || {
-            let mut pg: std::collections::HashMap<String, Vec<MediaFile>> = std::collections::HashMap::new();
-            let mut vg: std::collections::HashMap<String, Vec<MediaFile>> = std::collections::HashMap::new();
+            let mut pg: std::collections::HashMap<String, Vec<MediaFile>> =
+                std::collections::HashMap::new();
+            let mut vg: std::collections::HashMap<String, Vec<MediaFile>> =
+                std::collections::HashMap::new();
             for f in &files {
                 let s = session_for(f);
                 match f.media_type {
@@ -1287,8 +1577,24 @@ impl App {
                 }
             }
 
-            let mut pdb = match Database::open(&pd, Some(&pm)) { Ok(d) => d, Err(e) => { let mut t = task.lock().unwrap(); t.result = TaskResult::Error(format!("照片数据库错误: {e}")); t.done = true; return; } };
-            let mut vdb = match Database::open(&vd, Some(&vm)) { Ok(d) => d, Err(e) => { let mut t = task.lock().unwrap(); t.result = TaskResult::Error(format!("视频数据库错误: {e}")); t.done = true; return; } };
+            let mut pdb = match Database::open(&pd, Some(&pm)) {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("照片数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
+            };
+            let mut vdb = match Database::open(&vd, Some(&vm)) {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("视频数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
+            };
 
             // Defer mirror sync during backup — flush once at end
             pdb.set_mirror_deferred(true);
@@ -1301,20 +1607,35 @@ impl App {
             let mut processed = 0usize;
             let mut all_backed_up: Vec<crate::backup::BackedUpFile> = Vec::new();
 
-            let groups: Vec<(String, Vec<MediaFile>)> = pg.into_iter().chain(vg.into_iter()).collect();
+            let groups: Vec<(String, Vec<MediaFile>)> =
+                pg.into_iter().chain(vg.into_iter()).collect();
 
             for (session, group) in &groups {
                 log.push(format!("处理 session: {session} ({} 个文件)", group.len()));
-                let r = backup_files(group, session, &pr, &vr, &mut pdb, &mut vdb, &mut |cur, _| {
-                    processed += 1;
-                    let fname = group.get(cur).map(|f| f.filename.as_str()).unwrap_or("");
-                    let mut t = task.lock().unwrap();
-                    t.current = processed;
-                    t.label = fname.to_string();
-                });
-                if r.copied > 0 { log.push(format!("  复制 {} 个文件", r.copied)); }
-                if r.skipped > 0 { log.push(format!("  跳过 {} 个（已存在）", r.skipped)); }
-                if r.failed > 0 { log.push(format!("  失败 {} 个", r.failed)); }
+                let r = backup_files(
+                    group,
+                    session,
+                    &pr,
+                    &vr,
+                    &mut pdb,
+                    &mut vdb,
+                    &mut |cur, _| {
+                        processed += 1;
+                        let fname = group.get(cur).map(|f| f.filename.as_str()).unwrap_or("");
+                        let mut t = task.lock().unwrap();
+                        t.current = processed;
+                        t.label = fname.to_string();
+                    },
+                );
+                if r.copied > 0 {
+                    log.push(format!("  复制 {} 个文件", r.copied));
+                }
+                if r.skipped > 0 {
+                    log.push(format!("  跳过 {} 个（已存在）", r.skipped));
+                }
+                if r.failed > 0 {
+                    log.push(format!("  失败 {} 个", r.failed));
+                }
                 copied += r.copied;
                 skipped += r.skipped;
                 failed += r.failed;
@@ -1323,15 +1644,22 @@ impl App {
             }
 
             // Flush deferred mirror syncs
-            if let Err(e) = pdb.flush_mirror() { log.push(format!("照片镜像同步失败: {e}")); }
-            if let Err(e) = vdb.flush_mirror() { log.push(format!("视频镜像同步失败: {e}")); }
+            if let Err(e) = pdb.flush_mirror() {
+                log.push(format!("照片镜像同步失败: {e}"));
+            }
+            if let Err(e) = vdb.flush_mirror() {
+                log.push(format!("视频镜像同步失败: {e}"));
+            }
 
-            let backup_summary = format!("备份完成\n✓ 已复制: {copied}\n↷ 跳过(重复): {skipped}\n✗ 失败: {failed}");
+            let backup_summary =
+                format!("备份完成\n✓ 已复制: {copied}\n↷ 跳过(重复): {skipped}\n✗ 失败: {failed}");
 
             // Full post-backup verification: re-hash every copied file on both SD card and disk.
             let verify_total = all_backed_up.len();
             let mismatches = if verify_total > 0 {
-                log.push(format!("开始全量校验 {verify_total} 个文件（SD卡 + 磁盘各一遍）…"));
+                log.push(format!(
+                    "开始全量校验 {verify_total} 个文件（SD卡 + 磁盘各一遍）…"
+                ));
                 {
                     let mut t = task.lock().unwrap();
                     t.current = 0;
@@ -1341,7 +1669,8 @@ impl App {
                 verify_backup(&all_backed_up, &mut |cur, tot| {
                     let idx = cur / 2;
                     let side = if cur % 2 == 0 { "SD卡" } else { "磁盘" };
-                    let fname = all_backed_up.get(idx)
+                    let fname = all_backed_up
+                        .get(idx)
                         .and_then(|f| f.source.file_name())
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
@@ -1364,10 +1693,14 @@ impl App {
             let mut t = task.lock().unwrap();
             // Log any errors that occurred during backup
             if !errs.is_empty() {
-                for e in &errs { log.push(format!("  错误: {e}")); }
+                for e in &errs {
+                    log.push(format!("  错误: {e}"));
+                }
             }
 
-            t.result = TaskResult::BackupWithVerify { summary: backup_summary };
+            t.result = TaskResult::BackupWithVerify {
+                summary: backup_summary,
+            };
             t.done = true;
         });
 
@@ -1379,19 +1712,34 @@ impl App {
         self.log.push(format!("开始校验{label}…"));
 
         let (db_path, mirror, root) = if photos {
-            (self.config.photos_db(), self.config.photos_mirror_db(), self.config.photos_root.clone())
+            (
+                self.config.photos_db(),
+                self.config.photos_mirror_db(),
+                self.config.photos_root.clone(),
+            )
         } else {
-            (self.config.videos_db(), self.config.videos_mirror_db(), self.config.videos_root.clone())
+            (
+                self.config.videos_db(),
+                self.config.videos_mirror_db(),
+                self.config.videos_root.clone(),
+            )
         };
 
         let task = self.task.clone();
         let log = self.log.clone();
-        { *task.lock().unwrap() = TaskState::default(); }
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
 
         std::thread::spawn(move || {
             let mut db = match Database::open(&db_path, Some(&mirror)) {
                 Ok(d) => d,
-                Err(e) => { let mut t = task.lock().unwrap(); t.result = TaskResult::Error(format!("数据库错误: {e}")); t.done = true; return; }
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
             };
 
             log.push("开始扫描目录并校验…".to_string());
@@ -1402,7 +1750,11 @@ impl App {
                 t.total = tot;
             }) {
                 Ok(mm) => {
-                    if mm.is_empty() { log.push("校验通过，无异常"); } else { log.push(format!("发现 {} 个异常", mm.len())); }
+                    if mm.is_empty() {
+                        log.push("校验通过，无异常");
+                    } else {
+                        log.push(format!("发现 {} 个异常", mm.len()));
+                    }
                     let mut t = task.lock().unwrap();
                     t.result = TaskResult::Verify { errors: mm };
                     t.done = true;
@@ -1424,23 +1776,41 @@ impl App {
         self.log.push(format!("开始校验{label}…"));
 
         let (db_path, mirror, root) = if photos {
-            (self.config.photos_db(), self.config.photos_mirror_db(), self.config.photos_root.clone())
+            (
+                self.config.photos_db(),
+                self.config.photos_mirror_db(),
+                self.config.photos_root.clone(),
+            )
         } else {
-            (self.config.videos_db(), self.config.videos_mirror_db(), self.config.videos_root.clone())
+            (
+                self.config.videos_db(),
+                self.config.videos_mirror_db(),
+                self.config.videos_root.clone(),
+            )
         };
 
         let task = self.task.clone();
         let log = self.log.clone();
-        { *task.lock().unwrap() = TaskState::default(); }
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
 
         std::thread::spawn(move || {
             let mut db = match Database::open(&db_path, Some(&mirror)) {
                 Ok(d) => d,
-                Err(e) => { let mut t = task.lock().unwrap(); t.result = TaskResult::Error(format!("数据库错误: {e}")); t.done = true; return; }
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
             };
 
             let cnt = db.list_all().map(|r| r.len()).unwrap_or(0);
-            { let mut t = task.lock().unwrap(); t.total = cnt; }
+            {
+                let mut t = task.lock().unwrap();
+                t.total = cnt;
+            }
             log.push(format!("共 {cnt} 条记录需要校验"));
 
             match verify_db_records(&mut db, &root, &mut |cur, tot| {
@@ -1449,7 +1819,11 @@ impl App {
                 t.total = tot;
             }) {
                 Ok(mm) => {
-                    if mm.is_empty() { log.push("校验通过，无异常"); } else { log.push(format!("发现 {} 个异常", mm.len())); }
+                    if mm.is_empty() {
+                        log.push("校验通过，无异常");
+                    } else {
+                        log.push(format!("发现 {} 个异常", mm.len()));
+                    }
                     let mut t = task.lock().unwrap();
                     t.result = TaskResult::Verify { errors: mm };
                     t.done = true;
@@ -1474,7 +1848,8 @@ impl App {
             .or_else(|_| Database::open_readonly(&m))
             .and_then(|db| db.list_all())
             .unwrap_or_default();
-        self.log.push(format!("加载到 {} 条记录", self.list_records.len()));
+        self.log
+            .push(format!("加载到 {} 条记录", self.list_records.len()));
         self.screen = Screen::ListRecords;
     }
 
@@ -1493,49 +1868,89 @@ impl App {
         let checkpoint = self.config.reindex_checkpoint();
         let task = self.reindex_task.clone();
         let log = self.log.clone();
-        { *task.lock().unwrap() = TaskState::default(); }
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
         self.reindex_running = true;
         self.reindex_result_msg.clear();
 
         std::thread::spawn(move || {
             let mut photos_db = match Database::open(&pd, Some(&pm)) {
                 Ok(d) => d,
-                Err(e) => { let mut t = task.lock().unwrap(); t.result = TaskResult::Error(format!("数据库错误: {e}")); t.done = true; return; }
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
             };
             let mut videos_db = match Database::open(&vd, Some(&vm)) {
                 Ok(d) => d,
-                Err(e) => { let mut t = task.lock().unwrap(); t.result = TaskResult::Error(format!("数据库错误: {e}")); t.done = true; return; }
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
             };
 
             // Collect all media files from both roots.
             let mut candidates: Vec<(std::path::PathBuf, bool)> = Vec::new(); // (path, is_photo)
             for (root, is_photo) in [(&photos_root, true), (&videos_root, false)] {
-                for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-                    if !entry.file_type().is_file() { continue; }
+                for entry in walkdir::WalkDir::new(root)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
                     let path = entry.path().to_path_buf();
-                    let ext = path.extension().and_then(|x| x.to_str()).map(|x| x.to_lowercase()).unwrap_or_default();
+                    let ext = path
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.to_lowercase())
+                        .unwrap_or_default();
                     let is_media = crate::scanner::PHOTO_EXTS.contains(&ext.as_str())
                         || crate::scanner::VIDEO_EXTS.contains(&ext.as_str());
-                    if is_media { candidates.push((path, is_photo)); }
+                    if is_media {
+                        candidates.push((path, is_photo));
+                    }
                 }
             }
             candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
             let resume_from = Config::load_reindex_checkpoint(&checkpoint);
-            let start_idx = resume_from.as_ref()
-                .and_then(|last_path| candidates.iter().position(|(path, _)| path.to_string_lossy() == last_path.as_str()))
+            let start_idx = resume_from
+                .as_ref()
+                .and_then(|last_path| {
+                    candidates
+                        .iter()
+                        .position(|(path, _)| path.to_string_lossy() == last_path.as_str())
+                })
                 .map(|idx| idx + 1)
                 .unwrap_or(0);
 
             let total = candidates.len();
-            { let mut t = task.lock().unwrap(); t.total = total; }
+            {
+                let mut t = task.lock().unwrap();
+                t.total = total;
+            }
             if let Some(last_path) = &resume_from {
-                log.push(format!("发现 {total} 个媒体文件，从检查点继续：{last_path}"));
+                log.push(format!(
+                    "发现 {total} 个媒体文件，从检查点继续：{last_path}"
+                ));
             } else {
-                log.push(format!("发现 {total} 个媒体文件，逐个哈希、每 64 条批量写入…"));
+                log.push(format!(
+                    "发现 {total} 个媒体文件，逐个哈希、每 64 条批量写入…"
+                ));
             }
 
-            { let mut t = task.lock().unwrap(); t.current = start_idx; t.total = total; }
+            {
+                let mut t = task.lock().unwrap();
+                t.current = start_idx;
+                t.total = total;
+            }
 
             // 4 个工作线程并行哈希，主线程收结果攒满 64 条后批量写入 DB
             let mut batch: Vec<(std::path::PathBuf, bool, String)> = Vec::with_capacity(64);
@@ -1544,23 +1959,31 @@ impl App {
 
             let remaining = &candidates[start_idx..];
             let work_idx = Arc::new(AtomicUsize::new(0));
-            let (tx, rx) = std::sync::mpsc::sync_channel::<(std::path::PathBuf, bool, Result<String, String>)>(4);
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(
+                std::path::PathBuf,
+                bool,
+                Result<String, String>,
+            )>(4);
 
-            let workers: Vec<_> = (0..4).map(|_| {
-                let work_idx = work_idx.clone();
-                let tx = tx.clone();
-                let remaining: Vec<(PathBuf, bool)> = remaining.to_vec();
-                std::thread::spawn(move || {
-                    loop {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    let work_idx = work_idx.clone();
+                    let tx = tx.clone();
+                    let remaining: Vec<(PathBuf, bool)> = remaining.to_vec();
+                    std::thread::spawn(move || loop {
                         let idx = work_idx.fetch_add(1, Ordering::Relaxed);
-                        if idx >= remaining.len() { break; }
+                        if idx >= remaining.len() {
+                            break;
+                        }
                         let (ref path, is_photo) = remaining[idx];
                         let result = crate::hash::hash_file(path)
                             .map_err(|e| format!("哈希失败: {} — {e}", path.display()));
-                        if tx.send((path.clone(), is_photo, result)).is_err() { break; }
-                    }
+                        if tx.send((path.clone(), is_photo, result)).is_err() {
+                            break;
+                        }
+                    })
                 })
-            }).collect();
+                .collect();
             drop(tx); // 关闭发送端，rx 遍历结束后自动退出
 
             let mut processed = start_idx;
@@ -1568,7 +1991,10 @@ impl App {
 
             for (path, is_photo, result) in rx {
                 processed += 1;
-                { let mut t = task.lock().unwrap(); t.current = processed; }
+                {
+                    let mut t = task.lock().unwrap();
+                    t.current = processed;
+                }
 
                 match result {
                     Ok(hash) => {
@@ -1579,26 +2005,50 @@ impl App {
                 }
 
                 if batch.len() >= 64 {
-                    if let Err(e) = reindex_flush(&mut batch, &mut photos_db, &mut videos_db, &photos_root, &videos_root, &mut imported, &mut skipped, &log) {
+                    if let Err(e) = reindex_flush(
+                        &mut batch,
+                        &mut photos_db,
+                        &mut videos_db,
+                        &photos_root,
+                        &videos_root,
+                        &mut imported,
+                        &mut skipped,
+                        &log,
+                    ) {
                         let mut t = task.lock().unwrap();
                         t.result = TaskResult::Error(e);
                         t.done = true;
                         // 等待工作线程结束
-                        for w in workers { let _ = w.join(); }
+                        for w in workers {
+                            let _ = w.join();
+                        }
                         return;
                     }
                     if !last_path_for_checkpoint.is_empty() {
-                        if let Err(e) = Config::save_reindex_checkpoint(&checkpoint, &last_path_for_checkpoint) {
+                        if let Err(e) =
+                            Config::save_reindex_checkpoint(&checkpoint, &last_path_for_checkpoint)
+                        {
                             log.push(format!("保存断点失败: {e}"));
                         }
                     }
                 }
             }
 
-            for w in workers { let _ = w.join(); }
+            for w in workers {
+                let _ = w.join();
+            }
 
             // 收尾：写入剩余不足 64 条的记录
-            if let Err(e) = reindex_flush(&mut batch, &mut photos_db, &mut videos_db, &photos_root, &videos_root, &mut imported, &mut skipped, &log) {
+            if let Err(e) = reindex_flush(
+                &mut batch,
+                &mut photos_db,
+                &mut videos_db,
+                &photos_root,
+                &videos_root,
+                &mut imported,
+                &mut skipped,
+                &log,
+            ) {
                 let mut t = task.lock().unwrap();
                 t.result = TaskResult::Error(e);
                 t.done = true;
@@ -1606,10 +2056,17 @@ impl App {
             }
 
             Config::clear_reindex_checkpoint(&checkpoint);
-            { let mut t = task.lock().unwrap(); t.current = total; }
-            log.push(format!("重建索引完成：新增 {imported} 条，跳过 {skipped} 条（已在库中）"));
+            {
+                let mut t = task.lock().unwrap();
+                t.current = total;
+            }
+            log.push(format!(
+                "重建索引完成：新增 {imported} 条，跳过 {skipped} 条（已在库中）"
+            ));
             let mut t = task.lock().unwrap();
-            t.result = TaskResult::Reindex { summary: format!("新增 {imported} 条记录，跳过 {skipped} 条") };
+            t.result = TaskResult::Reindex {
+                summary: format!("新增 {imported} 条记录，跳过 {skipped} 条"),
+            };
             t.done = true;
         });
     }
@@ -1620,7 +2077,9 @@ impl App {
         } else {
             (self.config.videos_db(), self.config.videos_mirror_db())
         };
-        Database::open(&p, Some(&m)).ok().or_else(|| Database::open_readonly(&m).ok())
+        Database::open(&p, Some(&m))
+            .ok()
+            .or_else(|| Database::open_readonly(&m).ok())
     }
 
     fn spawn_spot_check(&mut self) {
@@ -1634,12 +2093,16 @@ impl App {
         let log = self.log.clone();
         let arc = self.spot_result_arc.clone();
 
-        { *task.lock().unwrap() = TaskState::default(); }
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
 
         std::thread::spawn(move || {
-            let pdb = Database::open(&pd, Some(&pm)).ok()
+            let pdb = Database::open(&pd, Some(&pm))
+                .ok()
                 .or_else(|| Database::open_readonly(&pm).ok());
-            let vdb = Database::open(&vd, Some(&vm)).ok()
+            let vdb = Database::open(&vd, Some(&vm))
+                .ok()
                 .or_else(|| Database::open_readonly(&vm).ok());
 
             let mut all_checked = 0usize;
@@ -1653,7 +2116,10 @@ impl App {
                     t.total = all_checked + total;
                 }) {
                     Ok(r) => {
-                        log.push(format!("照片库: {} 个文件夹有变化，校验 {} 个文件", r.sessions_covered, r.checked));
+                        log.push(format!(
+                            "照片库: {} 个文件夹有变化，校验 {} 个文件",
+                            r.sessions_covered, r.checked
+                        ));
                         all_checked += r.checked;
                         all_sessions += r.sessions_covered;
                         all_mismatches.extend(r.mismatches);
@@ -1669,7 +2135,10 @@ impl App {
                     t.total = all_checked + total;
                 }) {
                     Ok(r) => {
-                        log.push(format!("视频库: {} 个文件夹有变化，校验 {} 个文件", r.sessions_covered, r.checked));
+                        log.push(format!(
+                            "视频库: {} 个文件夹有变化，校验 {} 个文件",
+                            r.sessions_covered, r.checked
+                        ));
                         all_checked += r.checked;
                         all_sessions += r.sessions_covered;
                         all_mismatches.extend(r.mismatches);
@@ -1679,9 +2148,16 @@ impl App {
             }
 
             let summary = if all_mismatches.is_empty() {
-                format!("抽检通过：{} 个有变化的文件夹，共校验 {} 个文件，全部正常", all_sessions, all_checked)
+                format!(
+                    "抽检通过：{} 个有变化的文件夹，共校验 {} 个文件，全部正常",
+                    all_sessions, all_checked
+                )
             } else {
-                format!("⚠ 发现 {} 个问题（{} 个文件夹有变化）", all_mismatches.len(), all_sessions)
+                format!(
+                    "⚠ 发现 {} 个问题（{} 个文件夹有变化）",
+                    all_mismatches.len(),
+                    all_sessions
+                )
             };
 
             *arc.lock().unwrap() = Some(crate::backup::SpotCheckResult {
@@ -1710,31 +2186,52 @@ fn reindex_flush(
     skipped: &mut usize,
     log: &Log,
 ) -> Result<(), String> {
-    photos_db.begin_bulk().map_err(|e| format!("数据库错误: {e}"))?;
-    videos_db.begin_bulk().map_err(|e| { let _ = photos_db.rollback_bulk(); format!("数据库错误: {e}") })?;
+    photos_db
+        .begin_bulk()
+        .map_err(|e| format!("数据库错误: {e}"))?;
+    videos_db.begin_bulk().map_err(|e| {
+        let _ = photos_db.rollback_bulk();
+        format!("数据库错误: {e}")
+    })?;
 
     for (path, is_photo, hash) in batch.iter() {
         let db: &Database = if *is_photo { photos_db } else { videos_db };
         let root = if *is_photo { photos_root } else { videos_root };
 
-        let session = path.strip_prefix(root).ok()
+        let session = path
+            .strip_prefix(root)
+            .ok()
             .and_then(|rel| rel.components().next())
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .unwrap_or_else(|| "imported".to_string());
 
-        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let rel_path = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let rel_path = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-        match db.insert_file_if_missing_bulk(&filename, &rel_path, hash, file_size, None, &session) {
+        match db.insert_file_if_missing_bulk(&filename, &rel_path, hash, file_size, None, &session)
+        {
             Ok(true) => *imported += 1,
             Ok(false) => *skipped += 1,
             Err(e) => log.push(format!("插入失败: {filename} — {e}")),
         }
     }
 
-    photos_db.commit_bulk().map_err(|e| { let _ = videos_db.rollback_bulk(); format!("数据库错误: {e}") })?;
-    videos_db.commit_bulk().map_err(|e| format!("数据库错误: {e}"))?;
+    photos_db.commit_bulk().map_err(|e| {
+        let _ = videos_db.rollback_bulk();
+        format!("数据库错误: {e}")
+    })?;
+    videos_db
+        .commit_bulk()
+        .map_err(|e| format!("数据库错误: {e}"))?;
     batch.clear();
     Ok(())
 }

@@ -3,6 +3,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, DRIVE_REMOVABLE};
+
 /// 检测到的可选储存设备。这里只做发现，不自动读取内容。
 #[derive(Clone, Debug)]
 pub struct CardAlert {
@@ -14,10 +20,7 @@ pub struct CardAlert {
 ///
 /// - `alert`：所有已检测卷的列表，UI 线程轮询读取
 /// - `ctx`：触发 egui 重绘
-pub fn start_watcher(
-    alert: Arc<Mutex<(Vec<CardAlert>, u64)>>,
-    ctx: eframe::egui::Context,
-) {
+pub fn start_watcher(alert: Arc<Mutex<(Vec<CardAlert>, u64)>>, ctx: eframe::egui::Context) {
     std::thread::spawn(move || {
         let mut known: HashSet<PathBuf> = list_volumes().into_iter().collect();
 
@@ -39,7 +42,8 @@ pub fn start_watcher(
             }
 
             for vol in new_vols {
-                let name = vol.file_name()
+                let name = vol
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| vol.to_string_lossy().to_string());
 
@@ -62,15 +66,27 @@ pub fn list_volumes() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let exclude = [
-            "Macintosh HD", "Preboot", "Recovery", "VM", "Data",
-            "Update", "xarts", "Baseband", "Hardware",
+            "Macintosh HD",
+            "Preboot",
+            "Recovery",
+            "VM",
+            "Data",
+            "Update",
+            "xarts",
+            "Baseband",
+            "Hardware",
         ];
-        let Ok(entries) = std::fs::read_dir("/Volumes") else { return vec![]; };
+        let Ok(entries) = std::fs::read_dir("/Volumes") else {
+            return vec![];
+        };
         entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 p.is_dir() && !exclude.iter().any(|ex| name == *ex)
             })
             .collect()
@@ -97,10 +113,20 @@ pub fn list_volumes() -> Vec<PathBuf> {
     {
         (b'A'..=b'Z')
             .map(|c| PathBuf::from(format!("{}:\\", c as char)))
-            .filter(|p| p.exists())
+            .filter(|p| p.exists() && is_removable_windows_drive(p))
             .collect()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    { vec![] }
+    {
+        vec![]
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_removable_windows_drive(path: &std::path::Path) -> bool {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+
+    unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_REMOVABLE }
 }

@@ -154,7 +154,7 @@ moving_media/
 ### 模块职责
 
 #### `main.rs`
-初始化 `eframe` 窗口（680×560），注册全局 panic 钩子（写入 `~/.local/share/moving_media/crash.log`），启动 `app::App`。
+初始化 `eframe` 窗口（680×560），注册全局 panic 钩子（写入系统本地数据目录下的 `moving_media/crash.log`），启动 `app::App`。
 
 #### `app.rs`
 GUI 状态机，`Screen` 枚举控制当前界面：
@@ -167,7 +167,7 @@ Home → ScanResult → NamingSingle/NamingMulti → Running → SpotCheckDone
      └──── Reindex
 ```
 
-- 顶部横幅显示储存卡检测结果（scanning / 已备份 / 待备份）
+- 顶部横幅显示已检测到的储存设备，等待手动选择后再扫描
 - 底部可调整高度的实时日志面板
 - 后台任务通过 `Arc<Mutex<TaskState>>` 报告进度
 - 备份线程内直接执行全量校验，完成后跳转 SpotCheckDone
@@ -224,7 +224,7 @@ MOVING_MEDIA_DB_BACKUP  →  本地镜像 DB 目录
 - 有变化 → 校验该 session 全部文件；无变化 → 跳过
 
 #### `watcher.rs`
-后台线程每 2 秒轮询系统卷（macOS: `/Volumes/`，Linux: `/media/`，Windows: 盘符），检测新插入的储存卡，自动扫描并与数据库比对，通过 `egui::Context::request_repaint()` 触发界面更新。
+后台线程每 2 秒轮询系统卷（macOS: `/Volumes/`，Linux: `/media/` 和 `/mnt/`，Windows: 可移除盘符），检测新插入的储存设备，但不自动读取内容；通过 `egui::Context::request_repaint()` 触发界面更新。
 
 ---
 
@@ -253,8 +253,8 @@ CREATE UNIQUE INDEX idx_hash ON files(hash);
 
 ```
 主 DB（外置硬盘）                    镜像 DB（本机）
-Photos/moving_media.db    →   ~/.local/share/moving_media/photos_moving_media.db
-Videos/moving_media.db    →   ~/.local/share/moving_media/videos_moving_media.db
+Photos/moving_media.db    →   <系统本地数据目录>/moving_media/photos_moving_media.db
+Videos/moving_media.db    →   <系统本地数据目录>/moving_media/videos_moving_media.db
 ```
 
 外置硬盘未挂载时，扫描功能自动 fallback 到镜像（只读）。
@@ -305,7 +305,7 @@ Videos/moving_media.db    →   ~/.local/share/moving_media/videos_moving_media.
 ```sh
 export MOVING_MEDIA_PHOTOS=/Volumes/My_Files/Backup/Media/Photos
 export MOVING_MEDIA_VIDEOS=/Volumes/My_Files/Backup/Media/Videos
-export MOVING_MEDIA_DB_BACKUP=~/.local/share/moving_media/
+export MOVING_MEDIA_DB_BACKUP="$HOME/.local/share/moving_media"
 ```
 
 Windows 示例：
@@ -313,4 +313,5 @@ Windows 示例：
 ```cmd
 set MOVING_MEDIA_PHOTOS=D:\Backup\Media\Photos
 set MOVING_MEDIA_VIDEOS=D:\Backup\Media\Videos
+set MOVING_MEDIA_DB_BACKUP=%LOCALAPPDATA%\moving_media
 ```

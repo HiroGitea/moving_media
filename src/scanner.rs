@@ -19,7 +19,9 @@ pub struct MediaFile {
     pub file_size: u64,
 }
 
-pub static PHOTO_EXTS: &[&str] = &["arw", "raf", "cr3", "nef", "dng", "jpg", "jpeg", "heic", "ari", "r3d"];
+pub static PHOTO_EXTS: &[&str] = &[
+    "arw", "raf", "cr3", "nef", "dng", "jpg", "jpeg", "heic", "ari", "r3d",
+];
 pub static VIDEO_EXTS: &[&str] = &["mp4", "mov", "mts", "m2ts", "avi", "mxf"];
 
 pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
@@ -60,7 +62,12 @@ pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
 
             let file_size = e.metadata().map(|m| m.len()).unwrap_or(0);
 
-            Some(Entry { path, filename, media_type, file_size })
+            Some(Entry {
+                path,
+                filename,
+                media_type,
+                file_size,
+            })
         })
         .collect();
 
@@ -119,10 +126,7 @@ fn extract_mtime_date(path: &Path) -> Option<NaiveDate> {
 
 /// Return sorted unique dates from a list of files.
 pub fn unique_dates(files: &[MediaFile]) -> Vec<NaiveDate> {
-    let mut dates: Vec<NaiveDate> = files
-        .iter()
-        .filter_map(|f| f.capture_date)
-        .collect();
+    let mut dates: Vec<NaiveDate> = files.iter().filter_map(|f| f.capture_date).collect();
     dates.sort();
     dates.dedup();
     dates
@@ -151,8 +155,14 @@ mod tests {
 
         let files = scan_source(dir.path()).unwrap();
         assert_eq!(files.len(), 2);
-        let photos: Vec<_> = files.iter().filter(|f| f.media_type == MediaType::Photo).collect();
-        let videos: Vec<_> = files.iter().filter(|f| f.media_type == MediaType::Video).collect();
+        let photos: Vec<_> = files
+            .iter()
+            .filter(|f| f.media_type == MediaType::Photo)
+            .collect();
+        let videos: Vec<_> = files
+            .iter()
+            .filter(|f| f.media_type == MediaType::Video)
+            .collect();
         assert_eq!(photos.len(), 1);
         assert_eq!(videos.len(), 1);
     }

@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, params};
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection};
 use std::path::Path;
 
 /// Increment this when the schema changes. Add a migration arm in `run_migrations`.
@@ -21,7 +21,10 @@ pub fn check_version(db_path: &Path) -> Result<VersionStatus> {
         .with_context(|| format!("打开数据库失败: {}", db_path.display()))?;
     let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > CURRENT_VERSION {
-        Ok(VersionStatus::TooNew { db_version: version, app_version: CURRENT_VERSION })
+        Ok(VersionStatus::TooNew {
+            db_version: version,
+            app_version: CURRENT_VERSION,
+        })
     } else if version < CURRENT_VERSION {
         // version 0 could be fresh or pre-versioning — both are fine
         Ok(VersionStatus::Ok)
@@ -61,19 +64,27 @@ impl Database {
     pub fn open_readonly(mirror_path: &Path) -> Result<Self> {
         let conn = Connection::open(mirror_path)
             .with_context(|| format!("打开镜像数据库失败: {}", mirror_path.display()))?;
-        Ok(Database { conn, mirror_path: None, mirror_deferred: false, mirror_dirty: false })
+        Ok(Database {
+            conn,
+            mirror_path: None,
+            mirror_deferred: false,
+            mirror_dirty: false,
+        })
     }
 
     // ── Schema versioning ────────────────────────────────────
 
     fn get_version(&self) -> Result<u32> {
-        Ok(self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
     fn set_version(&self, v: u32) -> Result<()> {
         // user_version cannot be set via params binding, only string formatting is safe here
         // because v is a u32 (no injection risk).
-        self.conn.execute_batch(&format!("PRAGMA user_version = {v}"))?;
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {v}"))?;
         Ok(())
     }
 
@@ -157,7 +168,8 @@ impl Database {
 
     /// Remove a record by hash (used when a file is found missing on disk).
     pub fn delete_by_hash(&mut self, hash: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM files WHERE hash = ?1", params![hash])?;
+        self.conn
+            .execute("DELETE FROM files WHERE hash = ?1", params![hash])?;
         self.sync_mirror()?;
         Ok(())
     }
@@ -238,14 +250,14 @@ impl Database {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(FileRecord {
-                filename:     row.get(0)?,
-                dest_path:    row.get(1)?,
-                hash:         row.get(2)?,
-                hash_algo:    row.get(3)?,
-                file_size:    row.get::<_, i64>(4)? as u64,
+                filename: row.get(0)?,
+                dest_path: row.get(1)?,
+                hash: row.get(2)?,
+                hash_algo: row.get(3)?,
+                file_size: row.get::<_, i64>(4)? as u64,
                 session_name: row.get(5)?,
                 backed_up_at: row.get(6)?,
-                verified_at:  row.get(7)?,
+                verified_at: row.get(7)?,
             })
         })?;
         rows.map(|r| r.map_err(Into::into)).collect()
@@ -266,7 +278,8 @@ impl Database {
             }
             let mirror_str = mirror.to_string_lossy();
             let _ = std::fs::remove_file(mirror.as_path());
-            self.conn.execute_batch(&format!("VACUUM INTO '{mirror_str}'"))?;
+            self.conn
+                .execute_batch(&format!("VACUUM INTO '{mirror_str}'"))?;
         }
         self.mirror_dirty = false;
         Ok(())
@@ -288,14 +301,14 @@ impl Database {
 
 #[derive(Debug)]
 pub struct FileRecord {
-    pub filename:     String,
-    pub dest_path:    String,
-    pub hash:         String,
-    pub hash_algo:    String,
-    pub file_size:    u64,
+    pub filename: String,
+    pub dest_path: String,
+    pub hash: String,
+    pub hash_algo: String,
+    pub file_size: u64,
     pub session_name: String,
     pub backed_up_at: String,
-    pub verified_at:  Option<String>,
+    pub verified_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -307,9 +320,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let mut db = Database::open(&db_path, None).unwrap();
-        db.insert_file("DSC001.ARW", "20260322_新宿/DSC001.ARW", "abc123", 1024, None, "20260322_新宿").unwrap();
+        db.insert_file(
+            "DSC001.ARW",
+            "20260322_新宿/DSC001.ARW",
+            "abc123",
+            1024,
+            None,
+            "20260322_新宿",
+        )
+        .unwrap();
         let found = db.find_by_hash("abc123").unwrap();
-        assert_eq!(found, Some(("20260322_新宿".to_string(), "20260322_新宿/DSC001.ARW".to_string())));
+        assert_eq!(
+            found,
+            Some((
+                "20260322_新宿".to_string(),
+                "20260322_新宿/DSC001.ARW".to_string()
+            ))
+        );
         let missing = db.find_by_hash("nonexistent").unwrap();
         assert!(missing.is_none());
     }
@@ -320,8 +347,19 @@ mod tests {
         let db_path = dir.path().join("main.db");
         let mirror_path = dir.path().join("mirror.db");
         let mut db = Database::open(&db_path, Some(&mirror_path)).unwrap();
-        db.insert_file("video.mp4", "20260322_新宿/video.mp4", "def456", 2048, None, "20260322_新宿").unwrap();
-        assert!(mirror_path.exists(), "mirror DB should be created after insert");
+        db.insert_file(
+            "video.mp4",
+            "20260322_新宿/video.mp4",
+            "def456",
+            2048,
+            None,
+            "20260322_新宿",
+        )
+        .unwrap();
+        assert!(
+            mirror_path.exists(),
+            "mirror DB should be created after insert"
+        );
     }
 
     #[test]
@@ -354,7 +392,8 @@ mod tests {
                     verified_at TEXT
                 );
                 CREATE UNIQUE INDEX idx_hash ON files(hash);",
-            ).unwrap();
+            )
+            .unwrap();
             // user_version stays 0
         }
         let db = Database::open(&db_path, None).unwrap();
@@ -367,7 +406,8 @@ mod tests {
         let db_path = dir.path().join("future.db");
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(&format!("PRAGMA user_version = {}", CURRENT_VERSION + 1)).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {}", CURRENT_VERSION + 1))
+                .unwrap();
         }
         assert!(Database::open(&db_path, None).is_err());
     }
