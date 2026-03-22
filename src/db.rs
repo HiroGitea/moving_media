@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 /// Increment this when the schema changes. Add a migration arm in `run_migrations`.
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum VersionStatus {
@@ -95,7 +95,7 @@ impl Database {
     /// - Pre-versioning database (version=0, table exists): stamps CURRENT_VERSION, no DDL.
     /// - Versioned database (version>0): runs each migration step in order.
     pub fn migrate(&self) -> Result<()> {
-        let version = self.get_version()?;
+        let mut version = self.get_version()?;
 
         if version == 0 {
             let table_exists: bool = self.conn.query_row(
@@ -105,9 +105,9 @@ impl Database {
             )? > 0;
 
             if table_exists {
-                // Pre-versioning database: schema is already current, just stamp the version.
-                self.set_version(CURRENT_VERSION)?;
-                return Ok(());
+                // Pre-versioning database matches the original v1 schema.
+                version = 1;
+                self.set_version(version)?;
             }
         }
 
@@ -121,8 +121,7 @@ impl Database {
         for v in version..CURRENT_VERSION {
             match v {
                 0 => self.migration_v1()?,
-                // Future migrations:
-                // 1 => self.migration_v2()?,
+                1 => self.migration_v2()?,
                 _ => bail!("未知迁移步骤: {v} → {}", v + 1),
             }
             self.set_version(v + 1)?;
@@ -148,6 +147,13 @@ impl Database {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_hash ON files(hash);",
         )?;
+        Ok(())
+    }
+
+    /// v1 → v2: persist source capture/create time for fast SD-card compare.
+    fn migration_v2(&self) -> Result<()> {
+        self.conn
+            .execute_batch("ALTER TABLE files ADD COLUMN capture_time TEXT;")?;
         Ok(())
     }
 
@@ -179,15 +185,25 @@ impl Database {
         filename: &str,
         dest_path: &str,
         hash: &str,
+        capture_time: Option<&str>,
         file_size: u64,
         source_path: Option<&str>,
         session_name: &str,
     ) -> Result<()> {
         let now = chrono::Local::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO files (filename, dest_path, hash, hash_algo, file_size, source_path, session_name, backed_up_at)
-             VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7)",
-            params![filename, dest_path, hash, file_size as i64, source_path, session_name, now],
+            "INSERT INTO files (filename, dest_path, hash, hash_algo, capture_time, file_size, source_path, session_name, backed_up_at)
+             VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7, ?8)",
+            params![
+                filename,
+                dest_path,
+                hash,
+                capture_time,
+                file_size as i64,
+                source_path,
+                session_name,
+                now
+            ],
         )?;
         self.sync_mirror()?;
         Ok(())
@@ -219,6 +235,7 @@ impl Database {
         filename: &str,
         dest_path: &str,
         hash: &str,
+        capture_time: Option<&str>,
         file_size: u64,
         source_path: Option<&str>,
         session_name: &str,
@@ -226,9 +243,18 @@ impl Database {
         let now = chrono::Local::now().to_rfc3339();
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO files
-             (filename, dest_path, hash, hash_algo, file_size, source_path, session_name, backed_up_at)
-             VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7)",
-            params![filename, dest_path, hash, file_size as i64, source_path, session_name, now],
+             (filename, dest_path, hash, hash_algo, capture_time, file_size, source_path, session_name, backed_up_at)
+             VALUES (?1, ?2, ?3, 'blake3', ?4, ?5, ?6, ?7, ?8)",
+            params![
+                filename,
+                dest_path,
+                hash,
+                capture_time,
+                file_size as i64,
+                source_path,
+                session_name,
+                now
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -243,9 +269,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_capture_time(&mut self, hash: &str, capture_time: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET capture_time = ?1 WHERE hash = ?2",
+            params![capture_time, hash],
+        )?;
+        self.sync_mirror()?;
+        Ok(())
+    }
+
     pub fn list_all(&self) -> Result<Vec<FileRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT filename, dest_path, hash, hash_algo, file_size, session_name, backed_up_at, verified_at
+            "SELECT filename, dest_path, hash, hash_algo, capture_time, file_size, session_name, backed_up_at, verified_at
              FROM files ORDER BY backed_up_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -254,10 +289,34 @@ impl Database {
                 dest_path: row.get(1)?,
                 hash: row.get(2)?,
                 hash_algo: row.get(3)?,
-                file_size: row.get::<_, i64>(4)? as u64,
-                session_name: row.get(5)?,
-                backed_up_at: row.get(6)?,
-                verified_at: row.get(7)?,
+                capture_time: row.get(4)?,
+                file_size: row.get::<_, i64>(5)? as u64,
+                session_name: row.get(6)?,
+                backed_up_at: row.get(7)?,
+                verified_at: row.get(8)?,
+            })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    pub fn list_missing_capture_time(&self) -> Result<Vec<FileRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT filename, dest_path, hash, hash_algo, capture_time, file_size, session_name, backed_up_at, verified_at
+             FROM files
+             WHERE capture_time IS NULL OR capture_time = ''
+             ORDER BY backed_up_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FileRecord {
+                filename: row.get(0)?,
+                dest_path: row.get(1)?,
+                hash: row.get(2)?,
+                hash_algo: row.get(3)?,
+                capture_time: row.get(4)?,
+                file_size: row.get::<_, i64>(5)? as u64,
+                session_name: row.get(6)?,
+                backed_up_at: row.get(7)?,
+                verified_at: row.get(8)?,
             })
         })?;
         rows.map(|r| r.map_err(Into::into)).collect()
@@ -305,6 +364,7 @@ pub struct FileRecord {
     pub dest_path: String,
     pub hash: String,
     pub hash_algo: String,
+    pub capture_time: Option<String>,
     pub file_size: u64,
     pub session_name: String,
     pub backed_up_at: String,
@@ -324,6 +384,7 @@ mod tests {
             "DSC001.ARW",
             "20260322_新宿/DSC001.ARW",
             "abc123",
+            Some("2026-03-22 10:30:00"),
             1024,
             None,
             "20260322_新宿",
@@ -351,6 +412,7 @@ mod tests {
             "video.mp4",
             "20260322_新宿/video.mp4",
             "def456",
+            Some("2026-03-22 11:00:00"),
             2048,
             None,
             "20260322_新宿",
@@ -360,6 +422,32 @@ mod tests {
             mirror_path.exists(),
             "mirror DB should be created after insert"
         );
+    }
+
+    #[test]
+    fn test_list_missing_capture_time_and_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path, None).unwrap();
+        db.insert_file(
+            "photo.jpg",
+            "20260322_test/photo.jpg",
+            "hash1",
+            None,
+            123,
+            None,
+            "20260322_test",
+        )
+        .unwrap();
+
+        let missing = db.list_missing_capture_time().unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].hash, "hash1");
+
+        db.update_capture_time("hash1", "2026-03-22 10:00:00")
+            .unwrap();
+        let missing = db.list_missing_capture_time().unwrap();
+        assert!(missing.is_empty());
     }
 
     #[test]
@@ -398,6 +486,16 @@ mod tests {
         }
         let db = Database::open(&db_path, None).unwrap();
         assert_eq!(db.get_version().unwrap(), CURRENT_VERSION);
+
+        let has_capture_time: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='capture_time'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_capture_time, 1);
     }
 
     #[test]

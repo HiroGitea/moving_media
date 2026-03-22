@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -15,6 +15,7 @@ pub struct MediaFile {
     pub path: PathBuf,
     pub filename: String,
     pub media_type: MediaType,
+    pub capture_time: Option<String>,
     pub capture_date: Option<NaiveDate>,
     pub file_size: u64,
 }
@@ -75,14 +76,16 @@ pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
     let files: Vec<MediaFile> = candidates
         .into_par_iter()
         .map(|entry| {
-            let capture_date = match entry.media_type {
-                MediaType::Photo => extract_exif_date(&entry.path),
-                MediaType::Video => extract_mtime_date(&entry.path),
-            };
+            let capture_time = capture_time_for_path(&entry.path, &entry.media_type);
+            let capture_date = capture_time
+                .as_deref()
+                .and_then(|dt| dt.get(..10))
+                .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
             MediaFile {
                 path: entry.path,
                 filename: entry.filename,
                 media_type: entry.media_type,
+                capture_time,
                 capture_date,
                 file_size: entry.file_size,
             }
@@ -92,7 +95,14 @@ pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
     Ok(files)
 }
 
-fn extract_exif_date(path: &Path) -> Option<NaiveDate> {
+pub fn capture_time_for_path(path: &Path, media_type: &MediaType) -> Option<String> {
+    match media_type {
+        MediaType::Photo => extract_exif_datetime(path),
+        MediaType::Video => extract_fs_datetime(path),
+    }
+}
+
+fn extract_exif_datetime(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut bufreader = std::io::BufReader::new(file);
     let exif = exif::Reader::new()
@@ -104,26 +114,20 @@ fn extract_exif_date(path: &Path) -> Option<NaiveDate> {
         exif::Value::Ascii(v) => v.first()?.iter().map(|&b| b as char).collect::<String>(),
         _ => return None,
     };
-    // Format: "2026:03:22 10:30:00"
-    let date_part = dt_str.split_whitespace().next()?;
-    let parts: Vec<&str> = date_part.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let year: i32 = parts[0].parse().ok()?;
-    let month: u32 = parts[1].parse().ok()?;
-    let day: u32 = parts[2].parse().ok()?;
-    NaiveDate::from_ymd_opt(year, month, day)
+    let dt = NaiveDateTime::parse_from_str(dt_str.trim(), "%Y:%m:%d %H:%M:%S").ok()?;
+    Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
-fn extract_mtime_date(path: &Path) -> Option<NaiveDate> {
+fn extract_fs_datetime(path: &Path) -> Option<String> {
     use chrono::{DateTime, Local};
+
     let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?;
-    let dt: DateTime<Local> = mtime.into();
-    Some(dt.date_naive())
+    let ts = meta.created().ok().or_else(|| meta.modified().ok())?;
+    let dt: DateTime<Local> = ts.into();
+    Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
+/// Kept for tests/callers that only need a date.
 /// Return sorted unique dates from a list of files.
 pub fn unique_dates(files: &[MediaFile]) -> Vec<NaiveDate> {
     let mut dates: Vec<NaiveDate> = files.iter().filter_map(|f| f.capture_date).collect();

@@ -10,7 +10,7 @@ use crate::backup::{
 };
 use crate::config::Config;
 use crate::db::Database;
-use crate::scanner::{scan_source, unique_dates, MediaFile, MediaType};
+use crate::scanner::{capture_time_for_path, scan_source, unique_dates, MediaFile, MediaType};
 use crate::watcher::{start_watcher, CardAlert};
 
 // ── Log ──────────────────────────────────────────────────────
@@ -78,6 +78,7 @@ enum TaskResult {
         files: Vec<MediaFile>,
         backed_up: usize,
         new_count: usize,
+        skipped: usize,
     },
     Error(String),
 }
@@ -102,7 +103,7 @@ impl TaskState {
 }
 
 // ── Screen ───────────────────────────────────────────────────
-#[derive(Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 enum Screen {
     Setup,
     #[default]
@@ -119,6 +120,13 @@ enum Screen {
     VerifyPick,
     VerifyDone,
     ListRecords,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum CompareMode {
+    Time,
+    #[default]
+    Hash,
 }
 
 // ── App ──────────────────────────────────────────────────────
@@ -142,6 +150,7 @@ pub struct App {
     /// 重建索引独立任务槽，可与主任务并行
     reindex_task: Arc<Mutex<TaskState>>,
     reindex_running: bool,
+    reindex_title: String,
     reindex_result_msg: String,
     log: Log,
     log_cache: Vec<String>,
@@ -149,8 +158,10 @@ pub struct App {
 
     verify_mismatches: Vec<String>,
     list_records: Vec<crate::db::FileRecord>,
+    compare_mode: CompareMode,
     prescan_backed_up: usize,
     prescan_new: usize,
+    prescan_skipped: usize,
 
     /// 备份后抽检结果
     spot_result: Option<crate::backup::SpotCheckResult>,
@@ -357,14 +368,17 @@ impl App {
             task: Arc::new(Mutex::new(TaskState::default())),
             reindex_task: Arc::new(Mutex::new(TaskState::default())),
             reindex_running: false,
+            reindex_title: "重建索引".to_string(),
             reindex_result_msg: String::new(),
             log,
             log_cache: Vec::new(),
             log_gen: 0,
             verify_mismatches: Vec::new(),
             list_records: Vec::new(),
+            compare_mode: CompareMode::Hash,
             prescan_backed_up: 0,
             prescan_new: 0,
+            prescan_skipped: 0,
             spot_result: None,
             spot_result_arc: Arc::new(Mutex::new(None)),
             card_alert,
@@ -379,6 +393,10 @@ impl App {
 // ── 主循环 ───────────────────────────────────────────────────
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.go_back();
+        }
+
         // 检查预扫描完成
         if self.screen == Screen::Prescanning {
             let done = self.task.lock().unwrap().done;
@@ -389,12 +407,20 @@ impl eframe::App for App {
                         files,
                         backed_up,
                         new_count,
+                        skipped,
                     } => {
-                        self.log
-                            .push(format!("已备份: {backed_up}, 待备份: {new_count}"));
+                        match self.compare_mode {
+                            CompareMode::Hash => self
+                                .log
+                                .push(format!("散列匹配: {backed_up}, 待备份: {new_count}")),
+                            CompareMode::Time => self.log.push(format!(
+                                "时间匹配: {backed_up}, 未匹配: {new_count}, 无时间信息: {skipped}"
+                            )),
+                        }
                         self.scanned_files = files;
                         self.prescan_backed_up = backed_up;
                         self.prescan_new = new_count;
+                        self.prescan_skipped = skipped;
                         self.screen = Screen::ScanResult;
                     }
                     TaskResult::Error(msg) => {
@@ -549,6 +575,7 @@ impl eframe::App for App {
         // ── 上方主内容 ────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(6.0);
+            self.show_nav_bar(ui);
             match self.screen {
                 Screen::Setup => self.ui_setup(ui),
                 Screen::Home => self.ui_home(ui),
@@ -571,6 +598,50 @@ impl eframe::App for App {
 
 // ── UI ───────────────────────────────────────────────────────
 impl App {
+    fn back_target(&self) -> Option<Screen> {
+        match self.screen {
+            Screen::Setup => self.config.is_ready().then_some(Screen::Home),
+            Screen::Home => None,
+            Screen::Prescanning | Screen::Running | Screen::SpotChecking => None,
+            Screen::ScanResult => Some(Screen::Home),
+            Screen::DateDecision => Some(Screen::Home),
+            Screen::NamingSingle => Some(if self.unique_dates.len() > 1 {
+                Screen::DateDecision
+            } else {
+                Screen::Home
+            }),
+            Screen::NamingMulti => Some(Screen::DateDecision),
+            Screen::SpotCheckDone
+            | Screen::Done
+            | Screen::VerifyPick
+            | Screen::VerifyDone
+            | Screen::ListRecords => Some(Screen::Home),
+        }
+    }
+
+    fn go_back(&mut self) {
+        if let Some(target) = self.back_target() {
+            self.screen = target;
+        }
+    }
+
+    fn show_nav_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(target) = self.back_target() else {
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                .clicked()
+            {
+                self.screen = target;
+            }
+            ui.colored_label(DIM, "Esc");
+        });
+        ui.add_space(6.0);
+    }
+
     // ─ 重建索引浮动进度条 ──────────────────────────────────
     fn show_reindex_bar(&mut self, ctx: &egui::Context) {
         if !self.reindex_running && self.reindex_result_msg.is_empty() {
@@ -588,7 +659,7 @@ impl App {
                             (t.ratio(), t.current, t.total)
                         };
                         ui.horizontal(|ui| {
-                            ui.label("🔄 重建索引");
+                            ui.label(format!("🔄 {}", self.reindex_title));
                             ui.add(egui::ProgressBar::new(ratio).desired_width(320.0).text(
                                 if tot > 0 {
                                     format!("{cur}/{tot}")
@@ -600,7 +671,7 @@ impl App {
                     } else {
                         // 显示完成结果，点击关闭
                         ui.horizontal(|ui| {
-                            ui.label(format!("🔄 {}", self.reindex_result_msg));
+                            ui.label(format!("🔄 {}：{}", self.reindex_title, self.reindex_result_msg));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -837,6 +908,8 @@ impl App {
                 }
             }
         });
+        ui.add_space(4.0);
+        ui.colored_label(DIM, "插入储存设备后不会自动扫描。选择来源后，再手动点击“扫描检测”或“备份”。");
 
         ui.add_space(12.0);
 
@@ -844,10 +917,16 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_enabled_ui(has_src, |ui| {
                 if ui
-                    .add_sized(BTN_WIDE, egui::Button::new("🔍 扫描检测"))
+                    .add_sized(BTN_WIDE, egui::Button::new("🕒 时间比对"))
                     .clicked()
                 {
-                    self.do_prescan();
+                    self.do_time_compare();
+                }
+                if ui
+                    .add_sized(BTN_WIDE, egui::Button::new("🔐 散列比对"))
+                    .clicked()
+                {
+                    self.do_hash_compare();
                 }
                 if ui
                     .add_sized(BTN_MED, egui::Button::new("💾 备份"))
@@ -884,13 +963,22 @@ impl App {
                 {
                     self.do_reindex();
                 }
+                if ui
+                    .add_sized(BTN_MED, egui::Button::new("🕒 补时间列"))
+                    .clicked()
+                {
+                    self.do_fill_missing_capture_times();
+                }
             });
         });
     }
 
     // ─ ScanResult ──────────────────────────────────────────
     fn ui_scan_result(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🔍 扫描结果");
+        ui.heading(match self.compare_mode {
+            CompareMode::Hash => "🔐 散列比对结果",
+            CompareMode::Time => "🕒 时间比对结果",
+        });
         ui.separator();
         ui.add_space(8.0);
 
@@ -909,12 +997,23 @@ impl App {
                 ui.label("扫描到：");
                 ui.label(format!("{total} 个（{photos} 照片 / {videos} 视频）"));
                 ui.end_row();
-                ui.label("已备份：");
+                ui.label(match self.compare_mode {
+                    CompareMode::Hash => "散列匹配：",
+                    CompareMode::Time => "时间匹配：",
+                });
                 ui.colored_label(GREEN, format!("✓ {}", self.prescan_backed_up));
                 ui.end_row();
-                ui.label("待备份：");
+                ui.label(match self.compare_mode {
+                    CompareMode::Hash => "待备份：",
+                    CompareMode::Time => "未匹配：",
+                });
                 ui.colored_label(ORANGE, format!("◎ {}", self.prescan_new));
                 ui.end_row();
+                if self.compare_mode == CompareMode::Time {
+                    ui.label("无时间信息：");
+                    ui.colored_label(DIM, format!("· {}", self.prescan_skipped));
+                    ui.end_row();
+                }
             });
 
         ui.add_space(14.0);
@@ -1393,7 +1492,8 @@ impl App {
         }
     }
 
-    fn do_prescan(&mut self) {
+    fn do_hash_compare(&mut self) {
+        self.compare_mode = CompareMode::Hash;
         self.log.push(format!("开始扫描: {}", self.source_path));
         let source = PathBuf::from(&self.source_path);
         self.config.last_source = Some(source.clone());
@@ -1480,6 +1580,117 @@ impl App {
                 files,
                 backed_up: backed,
                 new_count: new,
+                skipped: 0,
+            };
+            t.done = true;
+        });
+
+        self.screen = Screen::Prescanning;
+    }
+
+    fn do_time_compare(&mut self) {
+        self.compare_mode = CompareMode::Time;
+        self.log.push(format!("开始时间比对: {}", self.source_path));
+        let source = PathBuf::from(&self.source_path);
+        self.config.last_source = Some(source.clone());
+        let _ = self.config.save();
+
+        let pd = self.config.photos_db();
+        let pm = self.config.photos_mirror_db();
+        let vd = self.config.videos_db();
+        let vm = self.config.videos_mirror_db();
+        let task = self.task.clone();
+        let log = self.log.clone();
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
+
+        std::thread::spawn(move || {
+            let files = match scan_source(&source) {
+                Err(e) => {
+                    log.push(format!("时间比对失败: {e}"));
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("时间比对失败: {e}"));
+                    t.done = true;
+                    return;
+                }
+                Ok(f) => {
+                    log.push(format!("扫描到 {} 个媒体文件", f.len()));
+                    f
+                }
+            };
+
+            log.push("正在按拍摄/创建时间对比数据库…");
+            let photo_records = Database::open(&pd, Some(&pm))
+                .ok()
+                .or_else(|| Database::open_readonly(&pm).ok())
+                .and_then(|db| db.list_all().ok())
+                .unwrap_or_default();
+            let video_records = Database::open(&vd, Some(&vm))
+                .ok()
+                .or_else(|| Database::open_readonly(&vm).ok())
+                .and_then(|db| db.list_all().ok())
+                .unwrap_or_default();
+
+            let mut photo_times: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut video_times: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+
+            for record in photo_records {
+                if let Some(ts) = record.capture_time {
+                    *photo_times.entry(ts).or_insert(0) += 1;
+                }
+            }
+            for record in video_records {
+                if let Some(ts) = record.capture_time {
+                    *video_times.entry(ts).or_insert(0) += 1;
+                }
+            }
+
+            let total = files.len();
+            {
+                let mut t = task.lock().unwrap();
+                t.total = total;
+            }
+
+            let mut matched = 0usize;
+            let mut unmatched = 0usize;
+            let mut skipped = 0usize;
+
+            for (idx, file) in files.iter().enumerate() {
+                let table = match file.media_type {
+                    MediaType::Photo => &mut photo_times,
+                    MediaType::Video => &mut video_times,
+                };
+
+                match file.capture_time.as_deref() {
+                    Some(ts) => {
+                        if let Some(remain) = table.get_mut(ts) {
+                            if *remain > 0 {
+                                *remain -= 1;
+                                matched += 1;
+                            } else {
+                                unmatched += 1;
+                            }
+                        } else {
+                            unmatched += 1;
+                        }
+                    }
+                    None => skipped += 1,
+                }
+
+                let mut t = task.lock().unwrap();
+                t.current = idx + 1;
+                t.label = file.filename.clone();
+            }
+
+            let mut t = task.lock().unwrap();
+            t.result = TaskResult::Prescan {
+                files,
+                backed_up: matched,
+                new_count: unmatched,
+                skipped,
             };
             t.done = true;
         });
@@ -1859,6 +2070,7 @@ impl App {
             self.log.push("重建索引正在进行中，请等待完成");
             return;
         }
+        self.reindex_title = "重建索引".to_string();
         self.log.push("开始重建索引：扫描备份目录…");
         let photos_root = self.config.photos_root.clone();
         let videos_root = self.config.videos_root.clone();
@@ -2072,6 +2284,149 @@ impl App {
         });
     }
 
+    fn do_fill_missing_capture_times(&mut self) {
+        if self.reindex_running {
+            self.log.push("后台索引任务正在进行中，请等待完成");
+            return;
+        }
+        self.reindex_title = "补时间列".to_string();
+        self.log.push("开始补齐缺失的 capture_time 列…");
+
+        let photos_root = self.config.photos_root.clone();
+        let videos_root = self.config.videos_root.clone();
+        let pd = self.config.photos_db();
+        let pm = self.config.photos_mirror_db();
+        let vd = self.config.videos_db();
+        let vm = self.config.videos_mirror_db();
+        let task = self.reindex_task.clone();
+        let log = self.log.clone();
+        {
+            *task.lock().unwrap() = TaskState::default();
+        }
+        self.reindex_running = true;
+        self.reindex_result_msg.clear();
+
+        std::thread::spawn(move || {
+            let mut photos_db = match Database::open(&pd, Some(&pm)) {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
+            };
+            let mut videos_db = match Database::open(&vd, Some(&vm)) {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("数据库错误: {e}"));
+                    t.done = true;
+                    return;
+                }
+            };
+
+            let photo_missing = match photos_db.list_missing_capture_time() {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("读取照片库失败: {e}"));
+                    t.done = true;
+                    return;
+                }
+            };
+            let video_missing = match videos_db.list_missing_capture_time() {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut t = task.lock().unwrap();
+                    t.result = TaskResult::Error(format!("读取视频库失败: {e}"));
+                    t.done = true;
+                    return;
+                }
+            };
+
+            let total = photo_missing.len() + video_missing.len();
+            {
+                let mut t = task.lock().unwrap();
+                t.total = total;
+            }
+
+            log.push(format!(
+                "发现 {} 条记录缺少时间（照片 {} / 视频 {}）",
+                total,
+                photo_missing.len(),
+                video_missing.len()
+            ));
+
+            photos_db.set_mirror_deferred(true);
+            videos_db.set_mirror_deferred(true);
+
+            let mut updated = 0usize;
+            let mut missing_on_disk = 0usize;
+            let mut no_time = 0usize;
+            let mut processed = 0usize;
+
+            for (records, root, media_type, db) in [
+                (
+                    photo_missing,
+                    photos_root.clone(),
+                    MediaType::Photo,
+                    &mut photos_db,
+                ),
+                (
+                    video_missing,
+                    videos_root.clone(),
+                    MediaType::Video,
+                    &mut videos_db,
+                ),
+            ] {
+                for record in records {
+                    processed += 1;
+                    {
+                        let mut t = task.lock().unwrap();
+                        t.current = processed;
+                        t.label = record.filename.clone();
+                    }
+
+                    let path = root.join(&record.dest_path);
+                    if !path.exists() {
+                        missing_on_disk += 1;
+                        continue;
+                    }
+
+                    match capture_time_for_path(&path, &media_type) {
+                        Some(capture_time) => {
+                            if let Err(e) = db.update_capture_time(&record.hash, &capture_time) {
+                                log.push(format!("补时间失败: {} — {e}", path.display()));
+                            } else {
+                                updated += 1;
+                            }
+                        }
+                        None => {
+                            no_time += 1;
+                        }
+                    }
+                }
+            }
+
+            if let Err(e) = photos_db.flush_mirror() {
+                log.push(format!("照片镜像同步失败: {e}"));
+            }
+            if let Err(e) = videos_db.flush_mirror() {
+                log.push(format!("视频镜像同步失败: {e}"));
+            }
+
+            let summary = format!(
+                "已补 {updated} 条，缺文件 {missing_on_disk} 条，无时间信息 {no_time} 条"
+            );
+            log.push(format!("补时间列完成：{summary}"));
+
+            let mut t = task.lock().unwrap();
+            t.result = TaskResult::Reindex { summary };
+            t.done = true;
+        });
+    }
+
     fn open_db(&self, photos: bool) -> Option<Database> {
         let (p, m) = if photos {
             (self.config.photos_db(), self.config.photos_mirror_db())
@@ -2217,9 +2572,22 @@ fn reindex_flush(
             .to_string_lossy()
             .to_string();
         let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let media_type = if *is_photo {
+            MediaType::Photo
+        } else {
+            MediaType::Video
+        };
+        let capture_time = capture_time_for_path(path, &media_type);
 
-        match db.insert_file_if_missing_bulk(&filename, &rel_path, hash, file_size, None, &session)
-        {
+        match db.insert_file_if_missing_bulk(
+            &filename,
+            &rel_path,
+            hash,
+            capture_time.as_deref(),
+            file_size,
+            None,
+            &session,
+        ) {
             Ok(true) => *imported += 1,
             Ok(false) => *skipped += 1,
             Err(e) => log.push(format!("插入失败: {filename} — {e}")),
