@@ -32,16 +32,16 @@ impl CardAlert {
     }
 }
 
-/// 启动后台线程：每 2 秒轮询挂载卷，发现新卷时自动扫描。
+/// 启动后台线程：每 2 秒轮询挂载卷，发现新卷时自动扫描，卷弹出时自动移除。
 ///
-/// - `alert`：扫描结果写入此处，UI 线程轮询读取
+/// - `alert`：所有已检测卷的扫描结果列表，UI 线程轮询读取
 /// - `ctx`：触发 egui 重绘
 pub fn start_watcher(
     photos_db_path: PathBuf,
     videos_db_path: PathBuf,
     photos_mirror: PathBuf,
     videos_mirror: PathBuf,
-    alert: Arc<Mutex<(Option<CardAlert>, u64)>>,
+    alert: Arc<Mutex<(Vec<CardAlert>, u64)>>,
     ctx: eframe::egui::Context,
 ) {
     std::thread::spawn(move || {
@@ -52,7 +52,17 @@ pub fn start_watcher(
 
             let current: HashSet<PathBuf> = list_volumes().into_iter().collect();
             let new_vols: Vec<PathBuf> = current.difference(&known).cloned().collect();
+            let removed_vols: Vec<PathBuf> = known.difference(&current).cloned().collect();
             known = current;
+
+            // 移除已弹出的卷
+            if !removed_vols.is_empty() {
+                let mut a = alert.lock().unwrap();
+                a.0.retain(|c| !removed_vols.contains(&c.volume_path));
+                a.1 += 1;
+                drop(a);
+                ctx.request_repaint();
+            }
 
             for vol in new_vols {
                 let name = vol.file_name()
@@ -62,7 +72,7 @@ pub fn start_watcher(
                 // 先快速上报"扫描中"状态
                 {
                     let mut a = alert.lock().unwrap();
-                    a.0 = Some(CardAlert {
+                    a.0.push(CardAlert {
                         volume_path: vol.to_path_buf(),
                         volume_name: name.clone(),
                         total: 0,
@@ -86,9 +96,14 @@ pub fn start_watcher(
                     &videos_mirror,
                 );
 
+                // 原地更新该卷的记录
                 {
                     let mut a = alert.lock().unwrap();
-                    a.0 = Some(result);
+                    if let Some(entry) = a.0.iter_mut().find(|c| c.volume_path == vol) {
+                        *entry = result;
+                    } else {
+                        a.0.push(result);
+                    }
                     a.1 += 1;
                 }
                 ctx.request_repaint();

@@ -26,7 +26,7 @@ fn main() {
     if let Err(e) = eframe::run_native(
         "moving_media",
         options,
-        Box::new(|cc| Box::new(moving_media::App::new(cc))),
+        Box::new(|cc| Ok(Box::new(moving_media::App::new(cc)))),
     ) {
         eprintln!("启动失败: {e}");
         std::process::exit(1);

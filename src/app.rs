@@ -135,10 +135,10 @@ pub struct App {
     spot_result: Option<crate::backup::SpotCheckResult>,
     spot_result_arc: Arc<Mutex<Option<crate::backup::SpotCheckResult>>>,
 
-    /// 储存卡自动检测结果（后台线程写入）
-    card_alert: Arc<Mutex<(Option<CardAlert>, u64)>>,
+    /// 储存卡自动检测结果（后台线程写入，支持多卷）
+    card_alert: Arc<Mutex<(Vec<CardAlert>, u64)>>,
     /// 本地缓存，避免每帧克隆
-    card_alert_cache: Option<CardAlert>,
+    card_alert_cache: Vec<CardAlert>,
     card_alert_gen: u64,
     /// 用户已手动关闭的通知（按卷路径去重）
     dismissed_alerts: std::collections::HashSet<PathBuf>,
@@ -277,7 +277,7 @@ impl App {
             Screen::Setup
         };
 
-        let card_alert: Arc<Mutex<(Option<CardAlert>, u64)>> = Arc::new(Mutex::new((None, 0)));
+        let card_alert: Arc<Mutex<(Vec<CardAlert>, u64)>> = Arc::new(Mutex::new((Vec::new(), 0)));
 
         // 启动储存卡监听线程
         start_watcher(
@@ -320,7 +320,7 @@ impl App {
             spot_result: None,
             spot_result_arc: Arc::new(Mutex::new(None)),
             card_alert,
-            card_alert_cache: None,
+            card_alert_cache: Vec::new(),
             card_alert_gen: 0,
             dismissed_alerts: std::collections::HashSet::new(),
         }
@@ -403,10 +403,10 @@ impl eframe::App for App {
             }
         }
 
-        // ── 储存卡检测日志 ─────────────────────────
+        // ── 储存卡检测日志（每卷只记录一次） ──────
         {
-            let alert = self.card_alert_cache.clone();
-            if let Some(ref card) = alert {
+            let cache = self.card_alert_cache.clone();
+            for card in &cache {
                 if !card.scanning && !self.dismissed_alerts.contains(&card.volume_path) {
                     let key = card.volume_path.join(".logged");
                     if !self.dismissed_alerts.contains(&key) {
@@ -558,73 +558,69 @@ impl App {
         });
     }
 
-    // ─ 储存卡通知 banner ───────────────────────────────────
+    // ─ 储存卡通知 banner（支持多卷同时插入）──────────────
     fn show_card_banner(&mut self, ctx: &egui::Context) {
-        let Some(card) = self.card_alert_cache.clone() else { return };
-        if self.dismissed_alerts.contains(&card.volume_path) { return; }
+        let visible: Vec<CardAlert> = self.card_alert_cache
+            .iter()
+            .filter(|c| !self.dismissed_alerts.contains(&c.volume_path))
+            .cloned()
+            .collect();
+        if visible.is_empty() { return; }
 
-        // 扫描中
-        if card.scanning {
-            egui::TopBottomPanel::top("card_banner_scanning").show(ctx, |ui| {
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(40, 50, 80))
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(format!("检测到储存卡「{}」，正在扫描媒体文件…", card.volume_name));
-                        });
-                    });
-            });
-            return;
-        }
-
-        // 扫描完成
-        let (bg, icon, summary) = if card.all_backed_up() {
-            (
-                egui::Color32::from_rgb(30, 70, 40),
-                "✅",
-                format!(
-                    "「{}」所有 {} 个媒体文件已全部备份（照片 {} / 视频 {}）",
-                    card.volume_name, card.total,
-                    card.photos_backed_up, card.videos_backed_up
-                ),
-            )
-        } else {
-            (
-                egui::Color32::from_rgb(80, 50, 20),
-                "⚠",
-                format!(
-                    "「{}」有 {} 个文件未备份（照片 {} / 视频 {}），已备份 {}",
-                    card.volume_name, card.new_total(),
-                    card.photos_new, card.videos_new,
-                    card.photos_backed_up + card.videos_backed_up
-                ),
-            )
-        };
+        // 先收集操作，避免在 egui 闭包内借用 self
+        let mut to_dismiss: Vec<PathBuf> = Vec::new();
+        let mut to_backup: Option<PathBuf> = None;
 
         egui::TopBottomPanel::top("card_banner").show(ctx, |ui| {
             egui::Frame::none()
-                .fill(bg)
-                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .fill(egui::Color32::from_rgb(35, 42, 58))
+                .inner_margin(egui::Margin::symmetric(12.0, 7.0))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{icon}  {summary}"));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").clicked() {
-                                self.dismissed_alerts.insert(card.volume_path.clone());
+                    for card in &visible {
+                        ui.horizontal(|ui| {
+                            if card.scanning {
+                                ui.spinner();
+                                ui.label(format!("「{}」正在扫描媒体文件…", card.volume_name));
+                            } else if card.all_backed_up() {
+                                ui.colored_label(GREEN, format!(
+                                    "✅ 「{}」{} 个文件已全部备份（📷{} 🎬{}）",
+                                    card.volume_name, card.total,
+                                    card.photos_backed_up, card.videos_backed_up,
+                                ));
+                            } else {
+                                ui.colored_label(ORANGE, format!(
+                                    "⚠ 「{}」{} 个未备份（📷{} 🎬{}），已备份 {}",
+                                    card.volume_name, card.new_total(),
+                                    card.photos_new, card.videos_new,
+                                    card.photos_backed_up + card.videos_backed_up,
+                                ));
                             }
-                            if !card.all_backed_up() {
-                                if ui.add_sized([90.0, 24.0], egui::Button::new("立即备份")).clicked() {
-                                    self.source_path = card.volume_path.to_string_lossy().to_string();
-                                    self.dismissed_alerts.insert(card.volume_path.clone());
-                                    self.do_scan_for_backup();
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("✕").clicked() {
+                                    to_dismiss.push(card.volume_path.clone());
                                 }
-                            }
+                                if !card.scanning && !card.all_backed_up()
+                                    && to_backup.is_none()
+                                {
+                                    if ui.add_sized([70.0, 22.0], egui::Button::new("备份此卡")).clicked() {
+                                        to_backup = Some(card.volume_path.clone());
+                                        to_dismiss.push(card.volume_path.clone());
+                                    }
+                                }
+                            });
                         });
-                    });
+                    }
                 });
         });
+
+        for path in to_dismiss {
+            self.dismissed_alerts.insert(path);
+        }
+        if let Some(path) = to_backup {
+            self.source_path = path.to_string_lossy().to_string();
+            self.do_scan_for_backup();
+        }
     }
 
     // ─ Setup ───────────────────────────────────────────────

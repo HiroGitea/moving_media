@@ -12,8 +12,8 @@ name = "moving_media"
 path = "src/main.rs"
 
 [dependencies]
-eframe        = "0.27"
-egui          = "0.27"
+eframe        = "0.29"
+egui          = "0.29"
 rusqlite      = { version = "0.31", features = ["bundled"] }
 blake3        = { version = "1", features = ["rayon"] }
 rayon         = "1"
