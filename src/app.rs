@@ -10,7 +10,10 @@ use crate::backup::{
 };
 use crate::config::Config;
 use crate::db::Database;
-use crate::scanner::{capture_time_for_path, scan_source, unique_dates, MediaFile, MediaType};
+use crate::scanner::{
+    capture_time_for_path, count_media_files_with_cancel, scan_source,
+    scan_source_with_progress_and_cancel, unique_dates, MediaFile, MediaType,
+};
 use crate::watcher::{start_watcher, CardAlert};
 
 // ── Log ──────────────────────────────────────────────────────
@@ -88,6 +91,7 @@ struct TaskState {
     current: usize,
     total: usize,
     label: String,
+    cancel_requested: bool,
     done: bool,
     result: TaskResult,
 }
@@ -598,11 +602,23 @@ impl eframe::App for App {
 
 // ── UI ───────────────────────────────────────────────────────
 impl App {
+    fn task_cancel_requested(task: &Arc<Mutex<TaskState>>) -> bool {
+        task.lock().unwrap().cancel_requested
+    }
+
+    fn finish_cancelled_task(task: &Arc<Mutex<TaskState>>) {
+        let mut t = task.lock().unwrap();
+        t.cancel_requested = false;
+        t.label = "扫描已取消".to_string();
+        t.done = true;
+    }
+
     fn back_target(&self) -> Option<Screen> {
         match self.screen {
             Screen::Setup => self.config.is_ready().then_some(Screen::Home),
             Screen::Home => None,
-            Screen::Prescanning | Screen::Running | Screen::SpotChecking => None,
+            Screen::Prescanning => Some(Screen::Home),
+            Screen::Running | Screen::SpotChecking => None,
             Screen::ScanResult => Some(Screen::Home),
             Screen::DateDecision => Some(Screen::Home),
             Screen::NamingSingle => Some(if self.unique_dates.len() > 1 {
@@ -620,22 +636,36 @@ impl App {
     }
 
     fn go_back(&mut self) {
+        if self.screen == Screen::Prescanning {
+            let mut t = self.task.lock().unwrap();
+            t.cancel_requested = true;
+            t.label = "正在取消扫描…".to_string();
+            drop(t);
+            self.log.push("已请求取消当前扫描，返回首页");
+        }
         if let Some(target) = self.back_target() {
             self.screen = target;
         }
     }
 
     fn show_nav_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(target) = self.back_target() else {
+        if self.back_target().is_none() {
             return;
-        };
+        }
 
         ui.horizontal(|ui| {
             if ui
-                .add_sized(BTN_BACK, egui::Button::new("← 返回"))
+                .add_sized(
+                    BTN_BACK,
+                    egui::Button::new(if self.screen == Screen::Prescanning {
+                        "✕ 取消"
+                    } else {
+                        "← 返回"
+                    }),
+                )
                 .clicked()
             {
-                self.screen = target;
+                self.go_back();
             }
             ui.colored_label(DIM, "Esc");
         });
@@ -914,8 +944,13 @@ impl App {
         ui.add_space(12.0);
 
         let has_src = !self.source_path.is_empty();
+        let cancel_pending = self.task.lock().unwrap().cancel_requested;
+        if cancel_pending {
+            ui.colored_label(ORANGE, "正在取消当前扫描，请稍候…");
+            ui.add_space(8.0);
+        }
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(has_src, |ui| {
+            ui.add_enabled_ui(has_src && !cancel_pending, |ui| {
                 if ui
                     .add_sized(BTN_WIDE, egui::Button::new("🕒 时间比对"))
                     .clicked()
@@ -956,7 +991,7 @@ impl App {
             } else {
                 "🔄 重建索引"
             };
-            ui.add_enabled_ui(!self.reindex_running, |ui| {
+            ui.add_enabled_ui(!self.reindex_running && !cancel_pending, |ui| {
                 if ui
                     .add_sized(BTN_MED, egui::Button::new(reindex_label))
                     .clicked()
@@ -1203,9 +1238,9 @@ impl App {
     // ─ Prescanning ─────────────────────────────────────────
     fn ui_prescanning(&mut self, ui: &mut egui::Ui) {
         ui.add_space(40.0);
-        let (ratio, cur, tot) = {
+        let (ratio, cur, tot, label) = {
             let t = self.task.lock().unwrap();
-            (t.ratio(), t.current, t.total)
+            (t.ratio(), t.current, t.total, t.label.clone())
         };
         ui.vertical_centered(|ui| {
             ui.heading("扫描检测中…");
@@ -1220,6 +1255,10 @@ impl App {
                         "扫描文件中…".to_string()
                     }),
             );
+            if !label.is_empty() {
+                ui.add_space(10.0);
+                ui.colored_label(DIM, format!("→ {label}"));
+            }
         });
     }
 
@@ -1510,19 +1549,55 @@ impl App {
         }
 
         std::thread::spawn(move || {
-            let files = match scan_source(&source) {
+            {
+                let mut t = task.lock().unwrap();
+                t.label = "遍历目录，统计媒体文件总数…".to_string();
+            }
+            let estimated_total = match count_media_files_with_cancel(&source, || {
+                App::task_cancel_requested(&task)
+            }) {
+                Some(total) => total,
+                None => {
+                    App::finish_cancelled_task(&task);
+                    return;
+                }
+            };
+            {
+                let mut t = task.lock().unwrap();
+                t.current = 0;
+                t.total = estimated_total;
+                t.label = if estimated_total > 0 {
+                    "读取文件时间…".to_string()
+                } else {
+                    "未发现媒体文件".to_string()
+                };
+            }
+
+            let files = match scan_source_with_progress_and_cancel(
+                &source,
+                |cur, tot, filename| {
+                    let mut t = task.lock().unwrap();
+                    t.current = cur;
+                    t.total = tot;
+                    t.label = filename.to_string();
+                },
+                || App::task_cancel_requested(&task),
+            ) {
+                Ok(Some(f)) => f,
+                Ok(None) => {
+                    App::finish_cancelled_task(&task);
+                    return;
+                }
                 Err(e) => {
                     log.push(format!("扫描失败: {e}"));
                     let mut t = task.lock().unwrap();
+                    t.cancel_requested = false;
                     t.result = TaskResult::Error(format!("扫描失败: {e}"));
                     t.done = true;
                     return;
                 }
-                Ok(f) => {
-                    log.push(format!("扫描到 {} 个媒体文件", f.len()));
-                    f
-                }
             };
+            log.push(format!("扫描到 {} 个媒体文件", files.len()));
 
             log.push("正在计算哈希并对比数据库…");
             let photos_db = Database::open(&pd, Some(&pm))
@@ -1533,10 +1608,6 @@ impl App {
                 .or_else(|| Database::open_readonly(&vm).ok());
 
             let total = files.len();
-            {
-                let mut t = task.lock().unwrap();
-                t.total = total;
-            }
 
             // 并行哈希（rayon），然后串行查询数据库
             let progress = Arc::new(AtomicUsize::new(0));
@@ -1545,15 +1616,26 @@ impl App {
                 .map({
                     let progress = progress.clone();
                     let task = task.clone();
+                    let total = total;
                     move |file| {
+                        if App::task_cancel_requested(&task) {
+                            return None;
+                        }
                         let hash = crate::hash::hash_file(&file.path).ok();
                         let cur = progress.fetch_add(1, Ordering::Relaxed) + 1;
                         let mut t = task.lock().unwrap();
                         t.current = cur;
+                        t.total = total;
+                        t.label = format!("计算散列：{}", file.filename);
                         hash
                     }
                 })
                 .collect();
+
+            if App::task_cancel_requested(&task) {
+                App::finish_cancelled_task(&task);
+                return;
+            }
 
             let mut backed = 0usize;
             let mut new = 0usize;
@@ -1576,6 +1658,7 @@ impl App {
             }
 
             let mut t = task.lock().unwrap();
+            t.cancel_requested = false;
             t.result = TaskResult::Prescan {
                 files,
                 backed_up: backed,
@@ -1606,19 +1689,55 @@ impl App {
         }
 
         std::thread::spawn(move || {
-            let files = match scan_source(&source) {
+            {
+                let mut t = task.lock().unwrap();
+                t.label = "遍历目录，统计媒体文件总数…".to_string();
+            }
+            let estimated_total = match count_media_files_with_cancel(&source, || {
+                App::task_cancel_requested(&task)
+            }) {
+                Some(total) => total,
+                None => {
+                    App::finish_cancelled_task(&task);
+                    return;
+                }
+            };
+            {
+                let mut t = task.lock().unwrap();
+                t.current = 0;
+                t.total = estimated_total;
+                t.label = if estimated_total > 0 {
+                    "读取文件时间…".to_string()
+                } else {
+                    "未发现媒体文件".to_string()
+                };
+            }
+
+            let files = match scan_source_with_progress_and_cancel(
+                &source,
+                |cur, tot, filename| {
+                    let mut t = task.lock().unwrap();
+                    t.current = cur;
+                    t.total = tot;
+                    t.label = filename.to_string();
+                },
+                || App::task_cancel_requested(&task),
+            ) {
+                Ok(Some(f)) => f,
+                Ok(None) => {
+                    App::finish_cancelled_task(&task);
+                    return;
+                }
                 Err(e) => {
                     log.push(format!("时间比对失败: {e}"));
                     let mut t = task.lock().unwrap();
+                    t.cancel_requested = false;
                     t.result = TaskResult::Error(format!("时间比对失败: {e}"));
                     t.done = true;
                     return;
                 }
-                Ok(f) => {
-                    log.push(format!("扫描到 {} 个媒体文件", f.len()));
-                    f
-                }
             };
+            log.push(format!("扫描到 {} 个媒体文件", files.len()));
 
             log.push("正在按拍摄/创建时间对比数据库…");
             let photo_records = Database::open(&pd, Some(&pm))
@@ -1659,6 +1778,10 @@ impl App {
             let mut skipped = 0usize;
 
             for (idx, file) in files.iter().enumerate() {
+                if App::task_cancel_requested(&task) {
+                    App::finish_cancelled_task(&task);
+                    return;
+                }
                 let table = match file.media_type {
                     MediaType::Photo => &mut photo_times,
                     MediaType::Video => &mut video_times,
@@ -1686,6 +1809,7 @@ impl App {
             }
 
             let mut t = task.lock().unwrap();
+            t.cancel_requested = false;
             t.result = TaskResult::Prescan {
                 files,
                 backed_up: matched,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{NaiveDate, NaiveDateTime};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,35 +26,43 @@ pub static PHOTO_EXTS: &[&str] = &[
 ];
 pub static VIDEO_EXTS: &[&str] = &["mp4", "mov", "mts", "m2ts", "avi", "mxf"];
 
-pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
-    // Step 1: collect candidate entries serially (WalkDir is not Send).
-    struct Entry {
-        path: PathBuf,
-        filename: String,
-        media_type: MediaType,
-        file_size: u64,
-    }
+#[derive(Debug, Clone)]
+struct Entry {
+    path: PathBuf,
+    filename: String,
+    media_type: MediaType,
+    file_size: u64,
+}
 
-    let candidates: Vec<Entry> = WalkDir::new(source)
+pub fn count_media_files(source: &Path) -> usize {
+    count_media_files_with_cancel(source, || false).unwrap_or(0)
+}
+
+pub fn count_media_files_with_cancel<C>(source: &Path, should_cancel: C) -> Option<usize>
+where
+    C: Fn() -> bool,
+{
+    WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .take_while(|_| !should_cancel())
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| media_type_for_path(e.path()).is_some())
+        .count()
+        .into()
+}
+
+fn collect_candidates(source: &Path) -> Vec<Entry> {
+    // Step 1: collect candidate entries serially (WalkDir is not Send).
+    WalkDir::new(source)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter_map(|e| {
             let path = e.path().to_path_buf();
-            let ext = path
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.to_lowercase())
-                .unwrap_or_default();
-
-            let media_type = if PHOTO_EXTS.contains(&ext.as_str()) {
-                MediaType::Photo
-            } else if VIDEO_EXTS.contains(&ext.as_str()) {
-                MediaType::Video
-            } else {
-                return None;
-            };
+            let media_type = media_type_for_path(&path)?;
 
             let filename = path
                 .file_name()
@@ -70,29 +79,82 @@ pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
                 file_size,
             })
         })
-        .collect();
+        .collect()
+}
+
+pub fn scan_source(source: &Path) -> Result<Vec<MediaFile>> {
+    Ok(
+        scan_source_with_progress_and_cancel(source, |_, _, _| {}, || false)?
+            .unwrap_or_default(),
+    )
+}
+
+pub fn scan_source_with_progress<F>(source: &Path, progress_cb: F) -> Result<Vec<MediaFile>>
+where
+    F: Fn(usize, usize, &str) + Send + Sync,
+{
+    Ok(scan_source_with_progress_and_cancel(source, progress_cb, || false)?.unwrap_or_default())
+}
+
+pub fn scan_source_with_progress_and_cancel<F, C>(
+    source: &Path,
+    progress_cb: F,
+    should_cancel: C,
+) -> Result<Option<Vec<MediaFile>>>
+where
+    F: Fn(usize, usize, &str) + Send + Sync,
+    C: Fn() -> bool + Send + Sync,
+{
+    let candidates = collect_candidates(source);
+    let total = candidates.len();
 
     // Step 2: read EXIF / mtime in parallel across CPU cores.
-    let files: Vec<MediaFile> = candidates
+    let progress = AtomicUsize::new(0);
+    let files: Vec<Option<MediaFile>> = candidates
         .into_par_iter()
         .map(|entry| {
+            if should_cancel() {
+                return None;
+            }
             let capture_time = capture_time_for_path(&entry.path, &entry.media_type);
             let capture_date = capture_time
                 .as_deref()
                 .and_then(|dt| dt.get(..10))
                 .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
-            MediaFile {
+            let cur = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            progress_cb(cur, total, &entry.filename);
+            Some(MediaFile {
                 path: entry.path,
                 filename: entry.filename,
                 media_type: entry.media_type,
                 capture_time,
                 capture_date,
                 file_size: entry.file_size,
-            }
+            })
         })
         .collect();
 
-    Ok(files)
+    if should_cancel() {
+        Ok(None)
+    } else {
+        Ok(Some(files.into_iter().flatten().collect()))
+    }
+}
+
+fn media_type_for_path(path: &Path) -> Option<MediaType> {
+    let ext = path
+        .extension()
+        .and_then(|x| x.to_str())
+        .map(|x| x.to_lowercase())
+        .unwrap_or_default();
+
+    if PHOTO_EXTS.contains(&ext.as_str()) {
+        Some(MediaType::Photo)
+    } else if VIDEO_EXTS.contains(&ext.as_str()) {
+        Some(MediaType::Video)
+    } else {
+        None
+    }
 }
 
 pub fn capture_time_for_path(path: &Path, media_type: &MediaType) -> Option<String> {
