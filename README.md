@@ -1,10 +1,56 @@
 # moving_media
 
+SD card backup tool for photographers/videographers, built with Rust + egui. Cross-platform (macOS / Windows / Linux).
+
 相机储存卡备份工具，使用 Rust + egui 构建。跨平台（macOS / Windows / Linux）。
 
 将 SD 卡上的照片和视频备份到指定目录，通过 SQLite 数据库记录文件信息，并用 **BLAKE3** 散列值校验完整性，防止备份损坏或重复备份。
 
+[English](#english) · [中文](#中文)
+
 ---
+
+## English
+
+Backs up photos and videos from SD cards to a target directory, tracking file metadata in SQLite and verifying integrity with **BLAKE3** hashing to prevent corrupted or duplicate backups.
+
+### Features
+
+- **Auto-detection** — detects storage devices on insertion (background polling); a banner lets you pick the device, then choose to scan or back up
+- **EXIF date extraction** — reads `DateTimeOriginal` from photo EXIF data to auto-name destination folders
+- **Multi-day handling** — when a shoot spans multiple days, choose to split into separate folders or merge into one date-range folder
+- **BLAKE3 verification** — hardware-accelerated hashing (mmap + rayon), compared immediately after copy to guarantee lossless transfer
+- **Deduplication** — a file (by hash) is only ever backed up once, regardless of which card it came from
+- **Recovery from missing files** — if the DB has a record but the target file is gone, the stale record is deleted and the file re-backed up
+- **Multi-card support** — files from the same trip spread across multiple cards merge into the same folder
+- **Post-backup full verification** — after copying, every file is re-hashed on both the SD card and disk for double confirmation
+- **mtime spot-check** — periodic verification recursively checks folder modification times; only changed sessions get re-hashed
+- **Database versioning** — `PRAGMA user_version` tracks schema version with automatic migration on startup; refuses to open a DB from a newer program version
+- **Database mirroring** — the primary DB lives on external storage with a local mirror kept in sync, avoiding a single point of failure
+- **GUI** — native egui interface with progress display, interactive prompts, folder browsing, and a live log panel
+- **First-run setup** — automatically guides DB initialization when the target directory exists but no DB has been created yet
+
+### Build
+
+Requires the Rust toolchain ([rustup.rs](https://rustup.rs/)). macOS also needs the Xcode Command Line Tools (`xcode-select --install`).
+
+```sh
+cargo build --release
+# binary at target/release/moving_media
+```
+
+The first build downloads `NotoEmoji-Regular.ttf` (~418KB) via `curl` and embeds it into the binary; later builds reuse the cached copy.
+
+```sh
+cargo run --release
+cargo test   # all tests run inside the project dir, never touch production paths
+```
+
+Full usage guide, database schema, and architecture notes are in the [中文](#中文) section below.
+
+---
+
+## 中文
 
 ## 功能
 
